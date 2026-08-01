@@ -12,8 +12,8 @@ test("server-renders the LogSleuth investigation workspace", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>LogSleuth \| Web Log Investigation<\/title>/i);
-  assert.match(html, /Find the story/i);
-  assert.match(html, /LOCAL-FIRST SECURITY INVESTIGATION/i);
+  assert.match(html, /<title>LogSleuth \| Web 日志安全调查平台<\/title>/i);
+  assert.match(html, /从日志中找出/i);
+  assert.match(html, /本地优先安全调查/i);
   assert.doesNotMatch(html, /Your site is taking shape/i);
 });

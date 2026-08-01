@@ -97,7 +97,7 @@ export default function Home() {
   const [content, setContent] = useState("");
   const [fileName, setFileName] = useState("");
   const [selected, setSelected] = useState<"All" | Finding["severity"]>("All");
-  const [language, setLanguage] = useState<"en" | "zh">("en");
+  const [language, setLanguage] = useState<"en" | "zh">("zh");
   const t = copy[language];
   const result = useMemo(() => analyze(content), [content]);
   const filtered = result.findings.filter((item) => selected === "All" || item.severity === selected);
