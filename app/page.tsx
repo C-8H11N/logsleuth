@@ -75,10 +75,30 @@ function analyze(text: string) {
 
 const severityWeight = { Critical: 3, High: 2, Medium: 1 };
 
+const zhCategories: Record<string, string> = {
+  "SQL injection": "SQL 注入",
+  "Cross-site scripting": "跨站脚本（XSS）",
+  "Path traversal": "目录穿越",
+  "Sensitive-file probing": "敏感文件探测",
+  "Command-injection probe": "命令注入探测",
+  "Suspected credential attack": "疑似凭据攻击",
+};
+
+const copy = {
+  en: {
+    eyebrow: "LOCAL-FIRST SECURITY INVESTIGATION", hero: <>Find the story<br />hidden in your logs.</>, intro: "LogSleuth turns web-server logs into a concise attack timeline. Analysis happens in this browser—your evidence never leaves this device.", upload: "Upload access log", demo: "Load safe demo", scope: "Built for investigation and defense · Apache / Nginx common-log format", noLog: "No log loaded", requests: "parsed requests", export: "Export Markdown report ↗", start: "Start with an access log", empty: "Upload a file or load the included safe demo to explore the investigation workspace.", risk: "Risk score", review: "Immediate review recommended", safe: "No critical pattern detected", findings: "Security findings", ruleTypes: "rule types matched", sources: "Observed sources", sourceHint: "IPs with suspicious activity", highest: "Highest severity", localRules: "Deterministic local rules", timeline: "Incident timeline", events: "Events worth investigating", noFindings: "No findings for this filter.", concentration: "Source concentration", suspicious: "Suspicious activity by IP", noIndicators: "No matched indicators yet.", how: "How it works", method: "Rules identify high-signal request patterns. Findings preserve the original request context so an analyst can verify each conclusion.", finding: "finding", source: "Source", reportTitle: "LogSleuth Investigation Report", parsed: "Parsed requests", reportFindings: "Findings", reportRisk: "Risk score", reportSection: "Findings",
+  },
+  zh: {
+    eyebrow: "本地优先安全调查", hero: <>从日志中找出<br />攻击故事。</>, intro: "LogSleuth 将 Web 服务器日志转化为清晰的攻击时间线。分析完全在当前浏览器中完成，证据不会离开本设备。", upload: "上传访问日志", demo: "加载安全演示", scope: "用于安全调查与防御 · 支持 Apache / Nginx 常见日志格式", noLog: "尚未加载日志", requests: "条已解析请求", export: "导出 Markdown 报告 ↗", start: "从访问日志开始", empty: "上传日志文件，或加载内置安全演示，开始探索调查工作区。", risk: "风险评分", review: "建议立即人工复核", safe: "未发现严重攻击模式", findings: "安全发现", ruleTypes: "类规则命中", sources: "观察到的来源", sourceHint: "存在可疑活动的 IP", highest: "最高严重性", localRules: "确定性本地规则", timeline: "事件时间线", events: "值得调查的事件", noFindings: "当前筛选条件下没有发现。", concentration: "来源集中度", suspicious: "按 IP 统计的可疑活动", noIndicators: "尚未命中任何检测指标。", how: "工作原理", method: "规则识别高信号请求模式，并保留原始请求上下文，便于分析人员逐项核实结论。", finding: "项发现", source: "来源", reportTitle: "LogSleuth 调查报告", parsed: "已解析请求", reportFindings: "安全发现", reportRisk: "风险评分", reportSection: "发现详情",
+  },
+};
+
 export default function Home() {
   const [content, setContent] = useState("");
-  const [fileName, setFileName] = useState("No log loaded");
+  const [fileName, setFileName] = useState("");
   const [selected, setSelected] = useState<"All" | Finding["severity"]>("All");
+  const [language, setLanguage] = useState<"en" | "zh">("en");
+  const t = copy[language];
   const result = useMemo(() => analyze(content), [content]);
   const filtered = result.findings.filter((item) => selected === "All" || item.severity === selected);
   const topIps = useMemo(() => [...new Set(result.findings.map((item) => item.ip))].map((ip) => ({ ip, count: result.findings.filter((item) => item.ip === ip).length })).sort((a, b) => b.count - a.count).slice(0, 4), [result.findings]);
@@ -93,7 +113,7 @@ export default function Home() {
     reader.readAsText(file);
   }
   function downloadReport() {
-    const body = [`# LogSleuth Investigation Report`, ``, `- Source: ${fileName}`, `- Parsed requests: ${result.parsed.length}`, `- Findings: ${result.findings.length}`, `- Risk score: ${riskScore}/100`, ``, `## Findings`, ...result.findings.map((item) => `- **${item.severity} · ${item.category}** — ${item.timestamp} — ${item.ip} — \`${item.method} ${item.path}\` (HTTP ${item.status})`)].join("\n");
+    const body = [`# ${t.reportTitle}`, ``, `- ${t.source}: ${fileName}`, `- ${t.parsed}: ${result.parsed.length}`, `- ${t.reportFindings}: ${result.findings.length}`, `- ${t.reportRisk}: ${riskScore}/100`, ``, `## ${t.reportSection}`, ...result.findings.map((item) => `- **${item.severity} · ${language === "zh" ? zhCategories[item.category] : item.category}** — ${item.timestamp} — ${item.ip} — \`${item.method} ${item.path}\` (HTTP ${item.status})`)].join("\n");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([body], { type: "text/markdown" }));
     link.download = "logsleuth-report.md";
@@ -103,30 +123,31 @@ export default function Home() {
 
   return <main>
     <section className="hero">
-      <div className="eyebrow"><span className="pulse" /> LOCAL-FIRST SECURITY INVESTIGATION</div>
-      <h1>Find the story<br />hidden in your logs.</h1>
-      <p>LogSleuth turns web-server logs into a concise attack timeline. Analysis happens in this browser—your evidence never leaves this device.</p>
+      <button className="language" onClick={() => setLanguage(language === "en" ? "zh" : "en")}>{language === "en" ? "中文" : "EN"}</button>
+      <div className="eyebrow"><span className="pulse" /> {t.eyebrow}</div>
+      <h1>{t.hero}</h1>
+      <p>{t.intro}</p>
       <div className="actions">
-        <label className="button primary">Upload access log<input aria-label="Upload access log" type="file" accept=".log,.txt,text/plain" onChange={onFile} /></label>
-        <button className="button" onClick={() => loadText(SAMPLE_LOG, "demo-access.log")}>Load safe demo</button>
+        <label className="button primary">{t.upload}<input aria-label={t.upload} type="file" accept=".log,.txt,text/plain" onChange={onFile} /></label>
+        <button className="button" onClick={() => loadText(SAMPLE_LOG, "demo-access.log")}>{t.demo}</button>
       </div>
-      <div className="scope-note">Built for investigation and defense · Apache / Nginx common-log format</div>
+      <div className="scope-note">{t.scope}</div>
     </section>
 
     <section className="dashboard" aria-live="polite">
-      <div className="source-row"><span className="source-dot" /> <strong>{fileName}</strong><span>{result.parsed.length.toLocaleString()} parsed requests</span><button className="report" disabled={!content} onClick={downloadReport}>Export Markdown report ↗</button></div>
-      {!content ? <div className="empty"><div className="empty-mark">⌁</div><h2>Start with an access log</h2><p>Upload a file or load the included safe demo to explore the investigation workspace.</p></div> : <>
+      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {t.requests}</span><button className="report" disabled={!content} onClick={downloadReport}>{t.export}</button></div>
+      {!content ? <div className="empty"><div className="empty-mark">⌁</div><h2>{t.start}</h2><p>{t.empty}</p></div> : <>
         <div className="metrics">
-          <article><span>Risk score</span><strong className={riskScore > 60 ? "danger" : ""}>{riskScore}<small>/100</small></strong><em>{riskScore > 60 ? "Immediate review recommended" : "No critical pattern detected"}</em></article>
-          <article><span>Security findings</span><strong>{result.findings.length}</strong><em>{new Set(result.findings.map((item) => item.category)).size} rule types matched</em></article>
-          <article><span>Observed sources</span><strong>{topIps.length}</strong><em>IPs with suspicious activity</em></article>
-          <article><span>Highest severity</span><strong className="severity-word">{result.findings[0]?.severity ?? "—"}</strong><em>Deterministic local rules</em></article>
+          <article><span>{t.risk}</span><strong className={riskScore > 60 ? "danger" : ""}>{riskScore}<small>/100</small></strong><em>{riskScore > 60 ? t.review : t.safe}</em></article>
+          <article><span>{t.findings}</span><strong>{result.findings.length}</strong><em>{new Set(result.findings.map((item) => item.category)).size} {t.ruleTypes}</em></article>
+          <article><span>{t.sources}</span><strong>{topIps.length}</strong><em>{t.sourceHint}</em></article>
+          <article><span>{t.highest}</span><strong className="severity-word">{result.findings[0]?.severity ?? "—"}</strong><em>{t.localRules}</em></article>
         </div>
         <div className="grid">
-          <article className="panel timeline"><div className="panel-head"><div><span className="label">Incident timeline</span><h2>Events worth investigating</h2></div><div className="filters">{(["All", "Critical", "High", "Medium"] as const).map((level) => <button key={level} className={selected === level ? "active" : ""} onClick={() => setSelected(level)}>{level}</button>)}</div></div>
-            {filtered.length ? <ol>{filtered.map((item) => <li key={item.id}><span className={`severity ${item.severity.toLowerCase()}`}>{item.severity}</span><div><strong>{item.category}</strong><p><code>{item.method} {item.path}</code></p><small>{item.timestamp} · {item.ip} · HTTP {item.status}</small></div></li>)}</ol> : <p className="muted">No findings for this filter.</p>}
+          <article className="panel timeline"><div className="panel-head"><div><span className="label">{t.timeline}</span><h2>{t.events}</h2></div><div className="filters">{(["All", "Critical", "High", "Medium"] as const).map((level) => <button key={level} className={selected === level ? "active" : ""} onClick={() => setSelected(level)}>{level}</button>)}</div></div>
+            {filtered.length ? <ol>{filtered.map((item) => <li key={item.id}><span className={`severity ${item.severity.toLowerCase()}`}>{item.severity}</span><div><strong>{language === "zh" ? zhCategories[item.category] : item.category}</strong><p><code>{item.method} {item.path}</code></p><small>{item.timestamp} · {item.ip} · HTTP {item.status}</small></div></li>)}</ol> : <p className="muted">{t.noFindings}</p>}
           </article>
-          <article className="panel sources"><span className="label">Source concentration</span><h2>Suspicious activity by IP</h2>{topIps.length ? topIps.map((entry) => <div className="source" key={entry.ip}><div><code>{entry.ip}</code><span>{entry.count} finding{entry.count !== 1 ? "s" : ""}</span></div><div className="bar"><i style={{ width: `${(entry.count / topIps[0].count) * 100}%` }} /></div></div>) : <p className="muted">No matched indicators yet.</p>}<div className="method"><span className="label">How it works</span><p>Rules identify high-signal request patterns. Findings preserve the original request context so an analyst can verify each conclusion.</p></div></article>
+          <article className="panel sources"><span className="label">{t.concentration}</span><h2>{t.suspicious}</h2>{topIps.length ? topIps.map((entry) => <div className="source" key={entry.ip}><div><code>{entry.ip}</code><span>{entry.count} {t.finding}</span></div><div className="bar"><i style={{ width: `${(entry.count / topIps[0].count) * 100}%` }} /></div></div>) : <p className="muted">{t.noIndicators}</p>}<div className="method"><span className="label">{t.how}</span><p>{t.method}</p></div></article>
         </div>
       </>}
     </section>
