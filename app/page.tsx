@@ -23,6 +23,8 @@ type ParsedLog = {
   raw: string;
 };
 
+type Provider = "openai" | "deepseek" | "qwen" | "kimi" | "custom";
+
 const RULES = [
   { category: "SQL injection", severity: "Critical" as const, pattern: /(?:union(?:\s+all)?\s+select|select.+from|\bor\s+['\"]?1['\"]?\s*=\s*['\"]?1|sleep\s*\(|benchmark\s*\(|information_schema)/i },
   { category: "Cross-site scripting", severity: "High" as const, pattern: /(?:<script|%3cscript|onerror\s*=|onload\s*=|javascript:|alert\s*\()/i },
@@ -98,6 +100,10 @@ export default function Home() {
   const [fileName, setFileName] = useState("");
   const [selected, setSelected] = useState<"All" | Finding["severity"]>("All");
   const [language, setLanguage] = useState<"en" | "zh">("zh");
+  const [provider, setProvider] = useState<Provider>("openai");
+  const [agentReport, setAgentReport] = useState("");
+  const [agentError, setAgentError] = useState("");
+  const [agentLoading, setAgentLoading] = useState(false);
   const t = copy[language];
   const result = useMemo(() => analyze(content), [content]);
   const filtered = result.findings.filter((item) => selected === "All" || item.severity === selected);
@@ -119,6 +125,17 @@ export default function Home() {
     link.download = "logsleuth-report.md";
     link.click();
     URL.revokeObjectURL(link.href);
+  }
+  async function runAgent() {
+    setAgentError(""); setAgentReport(""); setAgentLoading(true);
+    try {
+      const response = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, findings: result.findings }) });
+      const data = await response.json() as { analysis?: string; error?: string };
+      if (!response.ok || !data.analysis) throw new Error(data.error ?? "AI analysis failed.");
+      setAgentReport(data.analysis);
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : "AI analysis failed.");
+    } finally { setAgentLoading(false); }
   }
 
   return <main>
@@ -149,6 +166,7 @@ export default function Home() {
           </article>
           <article className="panel sources"><span className="label">{t.concentration}</span><h2>{t.suspicious}</h2>{topIps.length ? topIps.map((entry) => <div className="source" key={entry.ip}><div><code>{entry.ip}</code><span>{entry.count} {t.finding}</span></div><div className="bar"><i style={{ width: `${(entry.count / topIps[0].count) * 100}%` }} /></div></div>) : <p className="muted">{t.noIndicators}</p>}<div className="method"><span className="label">{t.how}</span><p>{t.method}</p></div></article>
         </div>
+        <article className="panel agent"><div><span className="label">AI AGENT · OPTIONAL</span><h2>AI 安全研判</h2><p className="muted">仅发送已结构化的规则命中结果；原始日志不会发送给模型。未配置 API 时，本地规则模式仍可正常使用。</p></div><div className="agent-controls"><select aria-label="选择 AI 供应商" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="kimi">Kimi</option><option value="custom">自定义兼容 API</option></select><button className="button primary" disabled={agentLoading || !result.findings.length} onClick={runAgent}>{agentLoading ? "正在研判…" : "生成 AI 调查摘要"}</button></div>{agentError && <p className="agent-error">{agentError} 请在服务端 `.env` 中配置该供应商。</p>}{agentReport && <div className="agent-report">{agentReport}</div>}</article>
       </>}
     </section>
   </main>;
