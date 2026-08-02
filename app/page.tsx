@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, useMemo, useState } from "react";
+import { parsePcapng, type PcapResult } from "./pcapng";
 
 type Finding = {
   id: number;
@@ -97,6 +98,7 @@ const copy = {
 
 export default function Home() {
   const [content, setContent] = useState("");
+  const [pcapResult, setPcapResult] = useState<PcapResult | null>(null);
   const [fileName, setFileName] = useState("");
   const [selected, setSelected] = useState<"All" | Finding["severity"]>("All");
   const [language, setLanguage] = useState<"en" | "zh">("zh");
@@ -105,15 +107,17 @@ export default function Home() {
   const [agentError, setAgentError] = useState("");
   const [agentLoading, setAgentLoading] = useState(false);
   const t = copy[language];
-  const result = useMemo(() => analyze(content), [content]);
+  const textResult = useMemo(() => analyze(content), [content]);
+  const result = pcapResult ? { parsed: Array(pcapResult.packets).fill({}), findings: pcapResult.findings } : textResult;
   const filtered = result.findings.filter((item) => selected === "All" || item.severity === selected);
   const topIps = useMemo(() => [...new Set(result.findings.map((item) => item.ip))].map((ip) => ({ ip, count: result.findings.filter((item) => item.ip === ip).length })).sort((a, b) => b.count - a.count).slice(0, 4), [result.findings]);
   const riskScore = Math.min(100, result.findings.reduce((score, item) => score + severityWeight[item.severity] * 9, 0));
 
-  function loadText(text: string, name: string) { setContent(text); setFileName(name); }
+  function loadText(text: string, name: string) { setPcapResult(null); setContent(text); setFileName(name); }
   function onFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (file.name.toLowerCase().endsWith(".pcapng")) { file.arrayBuffer().then((data)=>{ const parsed=parsePcapng(data); setContent("");setPcapResult(parsed);setFileName(file.name); }).catch((error)=>setAgentError(error instanceof Error?error.message:"PCAPNG 解析失败。")); return; }
     const reader = new FileReader();
     reader.onload = () => loadText(String(reader.result ?? ""), file.name);
     reader.readAsText(file);
@@ -145,15 +149,15 @@ export default function Home() {
       <h1>{t.hero}</h1>
       <p>{t.intro}</p>
       <div className="actions">
-        <label className="button primary">{t.upload}<input aria-label={t.upload} type="file" accept=".log,.txt,text/plain" onChange={onFile} /></label>
+        <label className="button primary">{t.upload}<input aria-label={t.upload} type="file" accept=".log,.txt,.pcapng,text/plain" onChange={onFile} /></label>
         <button className="button" onClick={() => loadText(SAMPLE_LOG, "demo-access.log")}>{t.demo}</button>
       </div>
-      <div className="scope-note">{t.scope}</div>
+      <div className="scope-note">{t.scope} · 支持 `.pcapng` 基础网络取证</div>
     </section>
 
     <section className="dashboard" aria-live="polite">
-      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {t.requests}</span><button className="report" disabled={!content} onClick={downloadReport}>{t.export}</button></div>
-      {!content ? <div className="empty"><div className="empty-mark">⌁</div><h2>{t.start}</h2><p>{t.empty}</p></div> : <>
+      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {pcapResult?"个网络包":t.requests}</span><button className="report" disabled={!content&&!pcapResult} onClick={downloadReport}>{t.export}</button></div>
+      {!content&&!pcapResult ? <div className="empty"><div className="empty-mark">⌁</div><h2>{t.start}</h2><p>{t.empty} 也可上传 `.pcapng` 抓包文件。</p></div> : <>
         <div className="metrics">
           <article><span>{t.risk}</span><strong className={riskScore > 60 ? "danger" : ""}>{riskScore}<small>/100</small></strong><em>{riskScore > 60 ? t.review : t.safe}</em></article>
           <article><span>{t.findings}</span><strong>{result.findings.length}</strong><em>{new Set(result.findings.map((item) => item.category)).size} {t.ruleTypes}</em></article>
