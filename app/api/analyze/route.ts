@@ -14,17 +14,34 @@ function isProvider(value: unknown): value is Provider {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { provider?: unknown; findings?: unknown };
+    const body = await request.json() as { provider?: unknown; findings?: unknown; config?: { apiKey?: unknown; baseUrl?: unknown; model?: unknown } };
     if (!isProvider(body.provider) || !Array.isArray(body.findings)) {
       return Response.json({ error: "Invalid analysis request." }, { status: 400 });
     }
 
     const variables = providerVariables[body.provider];
-    const apiKey = process.env[variables.key];
-    const baseUrl = process.env[variables.baseUrl];
-    const model = process.env[variables.model];
+    const suppliedKey = typeof body.config?.apiKey === "string" ? body.config.apiKey.trim() : "";
+    const suppliedBaseUrl = typeof body.config?.baseUrl === "string" ? body.config.baseUrl.trim() : "";
+    const suppliedModel = typeof body.config?.model === "string" ? body.config.model.trim() : "";
+    const apiKey = suppliedKey || process.env[variables.key];
+    const baseUrl = suppliedBaseUrl || process.env[variables.baseUrl];
+    const model = suppliedModel || process.env[variables.model];
     if (!apiKey || !baseUrl || !model) {
       return Response.json({ error: `Provider '${body.provider}' is not configured on this server.` }, { status: 503 });
+    }
+
+    let configuredUrl: URL;
+    try {
+      configuredUrl = new URL(baseUrl);
+    } catch {
+      return Response.json({ error: "The API base URL is invalid." }, { status: 400 });
+    }
+    const localHttp = configuredUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(configuredUrl.hostname);
+    if (configuredUrl.username || configuredUrl.password || (configuredUrl.protocol !== "https:" && !localHttp)) {
+      return Response.json({ error: "Use HTTPS for remote APIs; HTTP is allowed only for localhost." }, { status: 400 });
+    }
+    if (apiKey.length > 4096 || model.length > 200 || baseUrl.length > 1000) {
+      return Response.json({ error: "The API configuration is too long." }, { status: 400 });
     }
 
     const findings = body.findings.slice(0, 60).map((finding) => ({

@@ -9,7 +9,7 @@
     "dev": "node ./node_modules/vinext/dist/cli.js dev",
     "build": "node ./node_modules/vinext/dist/cli.js build",
     "start": "node ./node_modules/vinext/dist/cli.js start",
-    "test": "node ./node_modules/vinext/dist/cli.js build && node --test tests/rendered-html.test.mjs",
+    "test": "node ./node_modules/vinext/dist/cli.js build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
