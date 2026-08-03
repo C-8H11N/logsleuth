@@ -24,11 +24,12 @@ type Finding struct {
 }
 
 type AnalysisResult struct {
-	ParsedCount   int            `json:"parsedCount"`
-	Unreadable    int            `json:"unreadableLines"`
-	Findings      []Finding      `json:"findings"`
-	CategoryCount map[string]int `json:"categoryCount"`
-	SourceCount   map[string]int `json:"sourceCount"`
+	ParsedCount   int             `json:"parsedCount"`
+	Unreadable    int             `json:"unreadableLines"`
+	Findings      []Finding       `json:"findings"`
+	CategoryCount map[string]int  `json:"categoryCount"`
+	SourceCount   map[string]int  `json:"sourceCount"`
+	Sessions      []AttackSession `json:"sessions"`
 }
 
 type parsedLog struct {
@@ -119,7 +120,12 @@ func AnalyzeLog(reader io.Reader) (AnalysisResult, error) {
 		result.SourceCount[ip]++
 	}
 	sort.SliceStable(result.Findings, func(i, j int) bool {
+		left, right := findingTime(result.Findings[i].Timestamp), findingTime(result.Findings[j].Timestamp)
+		if !left.IsZero() && !right.IsZero() {
+			return left.Before(right)
+		}
 		return strings.Compare(result.Findings[i].Timestamp, result.Findings[j].Timestamp) < 0
 	})
+	result.Sessions = CorrelateSessions(result.Findings)
 	return result, nil
 }

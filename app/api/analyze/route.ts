@@ -14,7 +14,7 @@ function isProvider(value: unknown): value is Provider {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { provider?: unknown; findings?: unknown; config?: { apiKey?: unknown; baseUrl?: unknown; model?: unknown } };
+    const body = await request.json() as { provider?: unknown; findings?: unknown; sessions?: unknown; question?: unknown; history?: unknown; config?: { apiKey?: unknown; baseUrl?: unknown; model?: unknown } };
     if (!isProvider(body.provider) || !Array.isArray(body.findings)) {
       return Response.json({ error: "Invalid analysis request." }, { status: 400 });
     }
@@ -44,7 +44,8 @@ export async function POST(request: Request) {
       return Response.json({ error: "The API configuration is too long." }, { status: 400 });
     }
 
-    const findings = body.findings.slice(0, 60).map((finding) => ({
+    const findings = body.findings.slice(0, 80).map((finding) => ({
+      id: Number(finding?.id ?? 0),
       severity: String(finding?.severity ?? "Unknown").slice(0, 16),
       category: String(finding?.category ?? "Unknown").slice(0, 100),
       timestamp: String(finding?.timestamp ?? "Unknown").slice(0, 80),
@@ -53,6 +54,13 @@ export async function POST(request: Request) {
       path: String(finding?.path ?? "").slice(0, 500),
       status: Number(finding?.status ?? 0),
     }));
+    const sessions = Array.isArray(body.sessions) ? body.sessions.slice(0, 20) : [];
+    const history = Array.isArray(body.history) ? body.history.slice(-8).flatMap((message) => {
+      const role = message?.role === "user" || message?.role === "assistant" ? message.role : null;
+      const content = typeof message?.content === "string" ? message.content.slice(0, 4000) : "";
+      return role && content ? [{ role, content }] : [];
+    }) : [];
+    const question = typeof body.question === "string" && body.question.trim() ? body.question.trim().slice(0, 2000) : "生成首次调查报告，包括事件摘要、攻击会话、关键证据、可信度、限制和安全的下一步调查建议。";
 
     const endpoint = new URL("chat/completions", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
     const response = await fetch(endpoint, {
@@ -62,8 +70,10 @@ export async function POST(request: Request) {
         model,
         temperature: 0.2,
         messages: [
-          { role: "system", content: "You are a defensive security incident analyst. Analyze only the supplied structured evidence. Do not invent facts, provide exploit payloads, destructive commands, credential collection steps, or instructions to access systems. Write a concise Chinese report with: incident summary, likely attack sequence, highest-priority evidence, confidence/limitations, and safe next investigation actions." },
-          { role: "user", content: `Analyze these local rule findings. They are leads, not confirmed compromise evidence:\n${JSON.stringify(findings)}` },
+          { role: "system", content: "You are LogSleuth, a defensive investigation agent. Base every conclusion only on supplied evidence. Cite findings as [E#id] and correlated sessions as [S#id]. Never invent citations. Separate fact, inference, confidence, and limitations. Do not provide exploit instructions. Respond in Chinese unless asked otherwise." },
+          { role: "user", content: `Investigation context. Findings are leads, not proof of compromise.\nFINDINGS:\n${JSON.stringify(findings)}\nCORRELATED SESSIONS:\n${JSON.stringify(sessions)}` },
+          ...history,
+          { role: "user", content: question },
         ],
       }),
     });

@@ -43,6 +43,8 @@ LogSleuth 是一个面向防御调查的本地安全工作台。它使用 Go 流
 | Web 攻击检测 | ✅ | SQLi、XSS、路径穿越、命令注入、敏感文件、Log4Shell、SSRF、WebShell 等 |
 | 行为聚合 | ✅ | 连续同类事件折叠，完整证据保留在报告中 |
 | 多模型 Agent | ✅ | OpenAI、DeepSeek、通义千问、Kimi、自定义兼容 API |
+| 攻击会话关联 | ✅ | 按来源 IP 和 30 分钟窗口关联阶段、可信度与证据编号 |
+| 对话式调查 Agent | ✅ | 支持持续追问，并通过 `[E#]` / `[S#]` 引用证据和会话 |
 | 双语界面 | ✅ | 中文 / English 一键切换 |
 | 调查报告 | ✅ | 导出 Markdown 调查报告 |
 | TCP 流重组 | 🧭 | 规划中 |
@@ -200,8 +202,8 @@ log-sleuth/
 - [ ] TCP 流重组与 HTTP 会话恢复
 - [ ] DNS、TLS SNI、证书和 Beacon 行为分析
 - [ ] YAML 自定义检测规则与热加载
-- [ ] 同一 IP 的攻击会话和阶段关联
-- [ ] Agent 对话式证据查询
+- [x] 同一 IP 的攻击会话和阶段关联
+- [x] Agent 对话式证据查询
 - [ ] SQLite 调查项目与备注
 - [ ] Wails Windows 桌面版与 GitHub Release
 

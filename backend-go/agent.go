@@ -19,9 +19,16 @@ type agentConfig struct {
 	Model   string `json:"model"`
 }
 type agentRequest struct {
-	Provider string      `json:"provider"`
-	Findings []Finding   `json:"findings"`
-	Config   agentConfig `json:"config"`
+	Provider string          `json:"provider"`
+	Findings []Finding       `json:"findings"`
+	Sessions []AttackSession `json:"sessions"`
+	Question string          `json:"question"`
+	History  []chatMessage   `json:"history"`
+	Config   agentConfig     `json:"config"`
+}
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 type providerEnv struct{ key, baseURL, model string }
 
@@ -67,10 +74,30 @@ func runAgent(input agentRequest) (string, error) {
 		findings = findings[:80]
 	}
 	evidence, _ := json.Marshal(findings)
-	payload := map[string]any{"model": model, "temperature": 0.2, "messages": []map[string]string{
-		{"role": "system", "content": "You are LogSleuth, a defensive incident investigation agent. Base every conclusion on supplied evidence and cite exact IP, time, request path, and rule category. Do not invent facts or provide exploit instructions. Respond in Chinese with: executive summary, attack sequence, evidence table, confidence and limitations, safe next investigation steps."},
-		{"role": "user", "content": "Analyze these deterministic local findings as leads, not proof of compromise:\n" + string(evidence)},
-	}}
+	sessions := input.Sessions
+	if len(sessions) > 20 {
+		sessions = sessions[:20]
+	}
+	sessionEvidence, _ := json.Marshal(sessions)
+	messages := []map[string]string{
+		{"role": "system", "content": "You are LogSleuth, a defensive incident investigation agent. Base every conclusion only on supplied evidence. Cite findings as [E#id] and correlated sessions as [S#id]. Never invent citations. Clearly separate fact, inference, confidence, and limitations. Do not provide exploit instructions. Respond in Chinese unless the user asks otherwise."},
+		{"role": "user", "content": "Investigation context. Findings are deterministic leads, not proof of compromise.\nFINDINGS:\n" + string(evidence) + "\nCORRELATED SESSIONS:\n" + string(sessionEvidence)},
+	}
+	history := input.History
+	if len(history) > 8 {
+		history = history[len(history)-8:]
+	}
+	for _, message := range history {
+		if (message.Role == "user" || message.Role == "assistant") && strings.TrimSpace(message.Content) != "" {
+			messages = append(messages, map[string]string{"role": message.Role, "content": truncate(message.Content, 4000)})
+		}
+	}
+	question := strings.TrimSpace(input.Question)
+	if question == "" {
+		question = "生成首次调查报告，包括事件摘要、攻击会话、关键证据、可信度、限制和安全的下一步调查建议。"
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": truncate(question, 2000)})
+	payload := map[string]any{"model": model, "temperature": 0.2, "messages": messages}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+key)
@@ -99,4 +126,11 @@ func runAgent(input agentRequest) (string, error) {
 		return "", errors.New("provider returned no analysis")
 	}
 	return decoded.Choices[0].Message.Content, nil
+}
+
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }

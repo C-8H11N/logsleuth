@@ -3,10 +3,12 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { parseCapture, type PcapResult } from "./pcapng";
 import { analyzeLog, type Finding } from "./log-analyzer";
+import { correlateSessions, type AttackSession } from "./attack-sessions";
 
 type Provider = "openai" | "deepseek" | "qwen" | "kimi" | "custom";
 type ApiConfig = { apiKey: string; baseUrl: string; model: string };
-type BackendLogResult = { parsedCount: number; unreadableLines: number; findings: Finding[] };
+type BackendLogResult = { parsedCount: number; unreadableLines: number; findings: Finding[]; sessions?: AttackSession[] };
+type ChatEntry = { role: "user" | "assistant"; content: string };
 
 const GO_ENGINE = "http://127.0.0.1:8787";
 
@@ -47,7 +49,11 @@ const zhCategories: Record<string, string> = {
   "Sensitive-file probing": "敏感文件探测",
   "Command-injection probe": "命令注入探测",
   "Suspected credential attack": "疑似凭据攻击",
+  "Log4Shell/JNDI probe": "Log4Shell/JNDI 探测",
+  "Web shell probing": "WebShell 探测",
+  "SSRF probe": "SSRF 探测",
 };
+const zhStages:Record<string,string>={"Reconnaissance":"侦察","Credential Access":"凭据访问","Persistence":"持久化","Exploitation":"利用尝试","Suspicious Activity":"可疑活动"};
 
 const copy = {
   en: {
@@ -67,7 +73,8 @@ export default function Home() {
   const [language, setLanguage] = useState<"en" | "zh">("zh");
   const [provider, setProvider] = useState<Provider>("openai");
   const [apiConfigs, setApiConfigs] = useState<Record<Provider, ApiConfig>>(EMPTY_CONFIGS);
-  const [agentReport, setAgentReport] = useState("");
+  const [agentMessages, setAgentMessages] = useState<ChatEntry[]>([]);
+  const [agentQuestion, setAgentQuestion] = useState("");
   const [agentError, setAgentError] = useState("");
   const [agentLoading, setAgentLoading] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
@@ -79,6 +86,7 @@ export default function Home() {
   const groupedFindings = useMemo(() => groupConsecutive(filtered), [filtered]);
   const topIps = useMemo(() => [...new Set(result.findings.map((item) => item.ip))].map((ip) => ({ ip, count: result.findings.filter((item) => item.ip === ip).length })).sort((a, b) => b.count - a.count).slice(0, 4), [result.findings]);
   const riskScore = Math.min(100, result.findings.reduce((score, item) => score + severityWeight[item.severity] * 9, 0));
+  const attackSessions = useMemo(() => backendResult?.sessions?.length ? backendResult.sessions : correlateSessions(result.findings), [backendResult, result.findings]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -86,7 +94,8 @@ export default function Home() {
     return () => controller.abort();
   }, []);
 
-  function loadText(text: string, name: string) { setPcapResult(null); setBackendResult(null); setContent(text); setFileName(name); setAgentError(""); }
+  function resetAgent() { setAgentMessages([]); setAgentQuestion(""); setAgentError(""); }
+  function loadText(text: string, name: string) { setPcapResult(null); setBackendResult(null); setContent(text); setFileName(name); resetAgent(); }
   function readLogInBrowser(file: File) {
     const reader = new FileReader();
     reader.onload = () => { loadText(String(reader.result ?? ""), file.name); setFileLoading(false); };
@@ -104,7 +113,7 @@ export default function Home() {
         setBackendResult(null);
         setPcapResult(parsed);
         setFileName(file.name);
-        setAgentError("");
+        resetAgent();
       }).catch((error) => setAgentError(error instanceof Error ? error.message : "抓包解析失败。"));
       return;
     }
@@ -115,7 +124,7 @@ export default function Home() {
       if (!response.ok) throw new Error("Go engine rejected the log.");
       const parsed = await response.json() as BackendLogResult;
       if (!Array.isArray(parsed.findings) || !Number.isFinite(parsed.parsedCount)) throw new Error("Invalid Go engine response.");
-      setPcapResult(null); setBackendResult(parsed); setContent("__GO_ENGINE_RESULT__"); setFileName(file.name); setAgentError(""); setEngineOnline(true); setFileLoading(false);
+      setPcapResult(null); setBackendResult(parsed); setContent("__GO_ENGINE_RESULT__"); setFileName(file.name); resetAgent(); setEngineOnline(true); setFileLoading(false);
     }).catch(() => readLogInBrowser(file));
   }
   function downloadReport() {
@@ -129,10 +138,24 @@ export default function Home() {
   function updateApiConfig(field: keyof ApiConfig, value: string) {
     setApiConfigs((current) => ({ ...current, [provider]: { ...current[provider], [field]: value } }));
   }
-  async function runAgent() {
-    setAgentError(""); setAgentReport(""); setAgentLoading(true);
+  function focusEvidence(id: number) {
+    setSelected("All");
+    const groupIndex = groupConsecutive(result.findings).findIndex((candidate) => candidate.items.some((item) => item.id === id));
+    if (groupIndex >= 0) setTimeout(() => document.querySelectorAll(".timeline li")[groupIndex]?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+  }
+  function renderAgentText(content: string) {
+    return content.split(/(\[E#\d+\]|\[S#\d+\])/g).map((part, index) => {
+      const evidence = part.match(/^\[E#(\d+)\]$/); if (evidence) return <button type="button" className="citation" key={`${part}-${index}`} onClick={() => focusEvidence(Number(evidence[1]))}>{part}</button>;
+      const session = part.match(/^\[S#(\d+)\]$/); if (session) return <button type="button" className="citation session-citation" key={`${part}-${index}`} onClick={() => document.getElementById(`attack-session-${session[1]}`)?.scrollIntoView({ behavior: "smooth", block: "center" })}>{part}</button>;
+      return part;
+    });
+  }
+  async function runAgent(question?: string) {
+    const prompt = question?.trim() || "生成首次调查报告，包括攻击会话、关键证据、可信度、限制和下一步建议。";
+    const history = agentMessages;
+    setAgentError(""); setAgentMessages((current) => [...current, { role: "user", content: prompt }]); setAgentQuestion(""); setAgentLoading(true);
     try {
-      const request = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, findings: result.findings, config: apiConfigs[provider] }) };
+      const request = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, findings: result.findings, sessions: attackSessions, question: prompt, history, config: apiConfigs[provider] }) };
       let response: Response;
       try {
         response = await fetch(`${GO_ENGINE}/api/v1/agent/analyze`, request);
@@ -142,7 +165,7 @@ export default function Home() {
       }
       const data = await response.json() as { analysis?: string; error?: string };
       if (!response.ok || !data.analysis) throw new Error(data.error ?? "AI analysis failed.");
-      setAgentReport(data.analysis);
+      setAgentMessages((current) => [...current, { role: "assistant", content: data.analysis! }]);
     } catch (error) {
       setAgentError(error instanceof Error ? error.message : "AI analysis failed.");
     } finally { setAgentLoading(false); }
@@ -171,6 +194,7 @@ export default function Home() {
           <article><span>{t.highest}</span><strong className="severity-word">{result.findings[0]?.severity ?? "—"}</strong><em>{t.localRules}</em></article>
         </div>
         {pcapResult && <article className="panel pcap-summary"><div><span className="label">{pcapResult.format} 流量基线{pcapResult.sampled ? ` · 前 ${(pcapResult.analyzedBytes / 1024 / 1024).toFixed(0)} MiB 采样` : ""}</span><h2>{pcapResult.findings.length ? "已发现需要调查的网络活动" : "解析成功，当前规则未发现明显异常"}</h2></div><div className="pcap-counters"><span><strong>{pcapResult.stats.ipv4}</strong>IPv4</span><span><strong>{pcapResult.stats.tcp}</strong>TCP</span><span><strong>{pcapResult.stats.udp}</strong>UDP</span><span><strong>{pcapResult.stats.dns}</strong>DNS</span><span><strong>{pcapResult.stats.http}</strong>HTTP</span><span><strong>{pcapResult.stats.hosts}</strong>主机</span></div></article>}
+        {attackSessions.length > 0 && <article className="panel session-panel"><div className="panel-head"><div><span className="label">CORRELATED ATTACK SESSIONS</span><h2>{language === "zh" ? "自动关联的攻击会话" : "Correlated attack sessions"}</h2></div><span className="session-total">{attackSessions.length} {language === "zh" ? "个会话" : "sessions"}</span></div><p className="muted session-note">{language === "zh" ? "按来源 IP 和 30 分钟活动窗口关联。可信度表示行为相关程度，不代表攻击已经成功。" : "Grouped by source IP and a 30-minute activity window. Confidence measures correlation, not successful compromise."}</p><div className="session-grid">{attackSessions.slice(0,8).map((session)=><details className="session-card" id={`attack-session-${session.id}`} key={session.id}><summary><span className={`severity ${session.severity.toLowerCase()}`}>{session.severity}</span><div><strong>S#{session.id} · <code>{session.ip}</code></strong><small>{session.startedAt} → {session.endedAt}</small></div><span className="confidence"><b>{session.confidence}%</b>{language === "zh" ? "关联度" : "confidence"}</span></summary><div className="session-body"><div className="stage-list">{session.stages.map((stage)=><span key={stage}>{language === "zh" ? zhStages[stage] ?? stage : stage}</span>)}</div><p>{session.count} {language === "zh" ? "条关联证据" : "correlated findings"}</p><div className="evidence-links">{session.evidenceIds.slice(0,12).map((id)=><button type="button" onClick={()=>focusEvidence(id)} key={id}>E#{id}</button>)}{session.evidenceIds.length>12&&<span>+{session.evidenceIds.length-12}</span>}</div></div></details>)}</div>{attackSessions.length>8&&<p className="muted session-more">{language === "zh" ? `当前展示关联度最高的 8 个会话，其余 ${attackSessions.length-8} 个会话仍会提供给 Agent。` : `Showing the top 8 sessions; ${attackSessions.length-8} more remain available to the agent.`}</p>}</article>}
         <div className="grid">
           <article className="panel timeline"><div className="panel-head"><div><span className="label">{t.timeline}</span><h2>{t.events}</h2></div><div className="filters">{(["All", "Critical", "High", "Medium"] as const).map((level) => <button key={level} className={selected === level ? "active" : ""} onClick={() => setSelected(level)}>{level}</button>)}</div></div>
             {groupedFindings.length ? <ol>{groupedFindings.map((group) => {
@@ -182,10 +206,12 @@ export default function Home() {
           <article className="panel sources"><span className="label">{t.concentration}</span><h2>{t.suspicious}</h2>{topIps.length ? topIps.map((entry) => <div className="source" key={entry.ip}><div><code>{entry.ip}</code><span>{entry.count} {t.finding}</span></div><div className="bar"><i style={{ width: `${(entry.count / topIps[0].count) * 100}%` }} /></div></div>) : <p className="muted">{t.noIndicators}</p>}<div className="method"><span className="label">{t.how}</span><p>{t.method}</p></div></article>
         </div>
         <article className="panel agent">
-          <div><span className="label">LOGSLEUTH INVESTIGATION AGENT</span><h2>证据驱动的 AI 安全研判</h2><p className="muted">Agent 以本地规则发现为证据，输出攻击链、关键请求、可信度与下一步调查建议。API Key 只保存在当前页面内存中，刷新后清除；留空则使用服务端 `.env` 配置。</p></div>
-          <div className="agent-controls"><select aria-label="选择 AI 供应商" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="kimi">Kimi</option><option value="custom">自定义兼容 API</option></select><button className="button primary" disabled={agentLoading || !result.findings.length} onClick={runAgent}>{agentLoading ? "正在研判…" : "生成 AI 调查摘要"}</button></div>
+          <div><span className="label">CONVERSATIONAL INVESTIGATION AGENT</span><h2>与证据对话，持续追问攻击过程</h2><p className="muted">Agent 只基于本地规则发现和攻击会话回答。引用 `[E#]` 可定位证据，引用 `[S#]` 可定位攻击会话；结论仍需人工复核。</p></div>
+          <div className="agent-controls"><select aria-label="选择 AI 供应商" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="kimi">Kimi</option><option value="custom">自定义兼容 API</option></select><button className="button primary" disabled={agentLoading || !result.findings.length} onClick={()=>runAgent()}>{agentLoading ? "正在研判…" : agentMessages.length ? "重新生成调查报告" : "生成首次调查报告"}</button></div>
           <details className="api-config"><summary>在页面中配置 API（仅本次会话）</summary><div className="api-fields"><label>API Key<input type="password" value={apiConfigs[provider].apiKey} autoComplete="off" spellCheck={false} onChange={(event) => updateApiConfig("apiKey", event.target.value)} placeholder="sk-…" /></label><label>Base URL<input type="url" value={apiConfigs[provider].baseUrl} spellCheck={false} onChange={(event) => updateApiConfig("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label>模型名称<input type="text" value={apiConfigs[provider].model} spellCheck={false} onChange={(event) => updateApiConfig("model", event.target.value)} placeholder="model-name" /></label></div><p className="config-note">远程接口必须使用 HTTPS；本机接口可使用 localhost。配置不会写入磁盘。</p></details>
-          {agentError && <p className="agent-error">{agentError}</p>}{agentReport && <div className="agent-report">{agentReport}</div>}
+          {agentMessages.length>0&&<div className="agent-transcript" aria-live="polite">{agentMessages.map((message,index)=><div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role==="assistant"?"AGENT":"YOU"}</span><div>{message.role==="assistant"?renderAgentText(message.content):message.content}</div></div>)}{agentLoading&&<div className="chat-message assistant pending"><span>AGENT</span><div>正在核对证据并组织回答…</div></div>}</div>}
+          <form className="agent-question" onSubmit={(event)=>{event.preventDefault();if(agentQuestion.trim()&&!agentLoading)runAgent(agentQuestion);}}><label htmlFor="agent-question">继续追问</label><div><input id="agent-question" value={agentQuestion} onChange={(event)=>setAgentQuestion(event.target.value)} disabled={agentLoading||!result.findings.length} placeholder="例如：哪些请求可能成功？请引用证据。"/><button className="button primary" disabled={agentLoading||!agentQuestion.trim()||!result.findings.length} type="submit">发送</button></div></form>
+          {agentError && <p className="agent-error">{agentError}</p>}
         </article>
       </>}
     </section>
