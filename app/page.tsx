@@ -1,11 +1,14 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { parseCapture, type PcapResult } from "./pcapng";
 import { analyzeLog, type Finding } from "./log-analyzer";
 
 type Provider = "openai" | "deepseek" | "qwen" | "kimi" | "custom";
 type ApiConfig = { apiKey: string; baseUrl: string; model: string };
+type BackendLogResult = { parsedCount: number; unreadableLines: number; findings: Finding[] };
+
+const GO_ENGINE = "http://127.0.0.1:8787";
 
 const EMPTY_CONFIGS: Record<Provider, ApiConfig> = {
   openai: { apiKey: "", baseUrl: "", model: "" },
@@ -58,6 +61,7 @@ const copy = {
 export default function Home() {
   const [content, setContent] = useState("");
   const [pcapResult, setPcapResult] = useState<PcapResult | null>(null);
+  const [backendResult, setBackendResult] = useState<BackendLogResult | null>(null);
   const [fileName, setFileName] = useState("");
   const [selected, setSelected] = useState<"All" | Finding["severity"]>("All");
   const [language, setLanguage] = useState<"en" | "zh">("zh");
@@ -66,15 +70,29 @@ export default function Home() {
   const [agentReport, setAgentReport] = useState("");
   const [agentError, setAgentError] = useState("");
   const [agentLoading, setAgentLoading] = useState(false);
+  const [fileLoading, setFileLoading] = useState(false);
+  const [engineOnline, setEngineOnline] = useState(false);
   const t = copy[language];
   const textResult = useMemo(() => analyzeLog(content), [content]);
-  const result = useMemo(() => pcapResult ? { parsed: Array(pcapResult.packets).fill({}), findings: pcapResult.findings } : textResult, [pcapResult, textResult]);
+  const result = useMemo(() => pcapResult ? { parsed: Array(pcapResult.packets).fill({}), findings: pcapResult.findings } : backendResult ? { parsed: Array(backendResult.parsedCount).fill({}), findings: backendResult.findings } : textResult, [pcapResult, backendResult, textResult]);
   const filtered = useMemo(() => result.findings.filter((item) => selected === "All" || item.severity === selected), [result.findings, selected]);
   const groupedFindings = useMemo(() => groupConsecutive(filtered), [filtered]);
   const topIps = useMemo(() => [...new Set(result.findings.map((item) => item.ip))].map((ip) => ({ ip, count: result.findings.filter((item) => item.ip === ip).length })).sort((a, b) => b.count - a.count).slice(0, 4), [result.findings]);
   const riskScore = Math.min(100, result.findings.reduce((score, item) => score + severityWeight[item.severity] * 9, 0));
 
-  function loadText(text: string, name: string) { setPcapResult(null); setContent(text); setFileName(name); setAgentError(""); }
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${GO_ENGINE}/api/v1/health`, { signal: controller.signal }).then((response) => setEngineOnline(response.ok)).catch(() => setEngineOnline(false));
+    return () => controller.abort();
+  }, []);
+
+  function loadText(text: string, name: string) { setPcapResult(null); setBackendResult(null); setContent(text); setFileName(name); setAgentError(""); }
+  function readLogInBrowser(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => { loadText(String(reader.result ?? ""), file.name); setFileLoading(false); };
+    reader.onerror = () => { setAgentError("日志文件读取失败，请确认文件未被其他程序锁定后重试。"); setFileLoading(false); };
+    reader.readAsText(file);
+  }
   function onFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -83,16 +101,22 @@ export default function Home() {
       file.slice(0, sampleLimit).arrayBuffer().then((data) => {
         const parsed = parseCapture(data, file.size > sampleLimit);
         setContent("");
+        setBackendResult(null);
         setPcapResult(parsed);
         setFileName(file.name);
         setAgentError("");
       }).catch((error) => setAgentError(error instanceof Error ? error.message : "抓包解析失败。"));
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => loadText(String(reader.result ?? ""), file.name);
-    reader.onerror = () => setAgentError("日志文件读取失败，请确认文件未被其他程序锁定后重试。");
-    reader.readAsText(file);
+    setFileLoading(true);
+    const form = new FormData();
+    form.append("file", file);
+    fetch(`${GO_ENGINE}/api/v1/analyze/log`, { method: "POST", body: form }).then(async (response) => {
+      if (!response.ok) throw new Error("Go engine rejected the log.");
+      const parsed = await response.json() as BackendLogResult;
+      if (!Array.isArray(parsed.findings) || !Number.isFinite(parsed.parsedCount)) throw new Error("Invalid Go engine response.");
+      setPcapResult(null); setBackendResult(parsed); setContent("__GO_ENGINE_RESULT__"); setFileName(file.name); setAgentError(""); setEngineOnline(true); setFileLoading(false);
+    }).catch(() => readLogInBrowser(file));
   }
   function downloadReport() {
     const body = [`# ${t.reportTitle}`, ``, `- ${t.source}: ${fileName}`, `- ${t.parsed}: ${result.parsed.length}`, `- ${t.reportFindings}: ${result.findings.length}`, `- ${t.reportRisk}: ${riskScore}/100`, ``, `## ${t.reportSection}`, ...result.findings.map((item) => `- **${item.severity} · ${language === "zh" ? zhCategories[item.category] : item.category}** — ${item.timestamp} — ${item.ip} — \`${item.method} ${item.path}\` (HTTP ${item.status})`)].join("\n");
@@ -108,7 +132,14 @@ export default function Home() {
   async function runAgent() {
     setAgentError(""); setAgentReport(""); setAgentLoading(true);
     try {
-      const response = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, findings: result.findings, config: apiConfigs[provider] }) });
+      const request = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider, findings: result.findings, config: apiConfigs[provider] }) };
+      let response: Response;
+      try {
+        response = await fetch(`${GO_ENGINE}/api/v1/agent/analyze`, request);
+        setEngineOnline(true);
+      } catch {
+        response = await fetch("/api/analyze", request);
+      }
       const data = await response.json() as { analysis?: string; error?: string };
       if (!response.ok || !data.analysis) throw new Error(data.error ?? "AI analysis failed.");
       setAgentReport(data.analysis);
@@ -124,14 +155,14 @@ export default function Home() {
       <h1>{t.hero}</h1>
       <p>{t.intro}</p>
       <div className="actions">
-        <label className="button primary">{t.upload}<input aria-label={t.upload} type="file" accept=".log,.txt,.pcap,.pcapng,text/plain,application/vnd.tcpdump.pcap" onChange={onFile} /></label>
+        <label className="button primary">{fileLoading ? "正在分析…" : t.upload}<input aria-label={t.upload} disabled={fileLoading} type="file" accept=".log,.txt,.pcap,.pcapng,text/plain,application/vnd.tcpdump.pcap" onChange={onFile} /></label>
         <button className="button" onClick={() => loadText(SAMPLE_LOG, "demo-access.log")}>{t.demo}</button>
       </div>
       <div className="scope-note">{t.scope} · 支持 `.pcap` / `.pcapng` 基础网络取证</div>
     </section>
 
     <section className="dashboard" aria-live="polite">
-      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {pcapResult?"个网络包":t.requests}</span><button className="report" disabled={!content&&!pcapResult} onClick={downloadReport}>{t.export}</button></div>
+      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {pcapResult?"个网络包":t.requests}</span>{backendResult && <span>{backendResult.unreadableLines.toLocaleString()} 行未识别</span>}<span className={`engine-state ${engineOnline ? "online" : "fallback"}`}>{engineOnline ? "GO ENGINE" : "BROWSER MODE"}</span><button className="report" disabled={!content&&!pcapResult} onClick={downloadReport}>{t.export}</button></div>
       {!content&&!pcapResult ? <div className="empty"><div className="empty-mark">⌁</div><h2>{t.start}</h2><p>{t.empty} 也可上传 `.pcap` / `.pcapng` 抓包文件。</p></div> : <>
         <div className="metrics">
           <article><span>{t.risk}</span><strong className={riskScore > 60 ? "danger" : ""}>{riskScore}<small>/100</small></strong><em>{riskScore > 60 ? t.review : t.safe}</em></article>
@@ -151,7 +182,7 @@ export default function Home() {
           <article className="panel sources"><span className="label">{t.concentration}</span><h2>{t.suspicious}</h2>{topIps.length ? topIps.map((entry) => <div className="source" key={entry.ip}><div><code>{entry.ip}</code><span>{entry.count} {t.finding}</span></div><div className="bar"><i style={{ width: `${(entry.count / topIps[0].count) * 100}%` }} /></div></div>) : <p className="muted">{t.noIndicators}</p>}<div className="method"><span className="label">{t.how}</span><p>{t.method}</p></div></article>
         </div>
         <article className="panel agent">
-          <div><span className="label">AI AGENT · OPTIONAL</span><h2>AI 安全研判</h2><p className="muted">仅发送结构化规则命中结果。API Key 只保存在当前页面内存中，刷新后清除；留空则使用服务端 `.env` 配置。</p></div>
+          <div><span className="label">LOGSLEUTH INVESTIGATION AGENT</span><h2>证据驱动的 AI 安全研判</h2><p className="muted">Agent 以本地规则发现为证据，输出攻击链、关键请求、可信度与下一步调查建议。API Key 只保存在当前页面内存中，刷新后清除；留空则使用服务端 `.env` 配置。</p></div>
           <div className="agent-controls"><select aria-label="选择 AI 供应商" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="qwen">通义千问</option><option value="kimi">Kimi</option><option value="custom">自定义兼容 API</option></select><button className="button primary" disabled={agentLoading || !result.findings.length} onClick={runAgent}>{agentLoading ? "正在研判…" : "生成 AI 调查摘要"}</button></div>
           <details className="api-config"><summary>在页面中配置 API（仅本次会话）</summary><div className="api-fields"><label>API Key<input type="password" value={apiConfigs[provider].apiKey} autoComplete="off" spellCheck={false} onChange={(event) => updateApiConfig("apiKey", event.target.value)} placeholder="sk-…" /></label><label>Base URL<input type="url" value={apiConfigs[provider].baseUrl} spellCheck={false} onChange={(event) => updateApiConfig("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" /></label><label>模型名称<input type="text" value={apiConfigs[provider].model} spellCheck={false} onChange={(event) => updateApiConfig("model", event.target.value)} placeholder="model-name" /></label></div><p className="config-note">远程接口必须使用 HTTPS；本机接口可使用 localhost。配置不会写入磁盘。</p></details>
           {agentError && <p className="agent-error">{agentError}</p>}{agentReport && <div className="agent-report">{agentReport}</div>}

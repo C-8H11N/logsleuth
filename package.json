@@ -11,6 +11,9 @@
     "start": "node ./node_modules/vinext/dist/cli.js start",
     "test": "node ./node_modules/vinext/dist/cli.js build && node --test tests/*.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "go:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-go.ps1",
+    "go:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-go.ps1",
+    "local": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-local.ps1",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
