@@ -30,6 +30,12 @@ type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
+type agentResult struct {
+	Analysis         string        `json:"analysis"`
+	CitationsValid   bool          `json:"citationsValid"`
+	InvalidCitations []string      `json:"invalidCitations"`
+	Retrieval        RetrievalInfo `json:"retrieval"`
+}
 type providerEnv struct{ key, baseURL, model string }
 
 var providers = map[string]providerEnv{
@@ -55,29 +61,28 @@ func validateEndpoint(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func runAgent(input agentRequest) (string, error) {
+func runAgent(input agentRequest) (agentResult, error) {
 	env, ok := providers[input.Provider]
 	if !ok {
-		return "", errors.New("unsupported provider")
+		return agentResult{}, errors.New("unsupported provider")
 	}
 	key, baseURL, model := configured(input.Config.APIKey, env.key), configured(input.Config.BaseURL, env.baseURL), configured(input.Config.Model, env.model)
 	if key == "" || baseURL == "" || model == "" {
-		return "", errors.New("provider is not configured")
+		return agentResult{}, errors.New("provider is not configured")
 	}
 	u, err := validateEndpoint(baseURL)
 	if err != nil {
-		return "", err
+		return agentResult{}, err
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/chat/completions"
-	findings := input.Findings
-	if len(findings) > 80 {
-		findings = findings[:80]
+	question := strings.TrimSpace(input.Question)
+	if question == "" {
+		question = "生成首次调查报告，包括事件摘要、攻击会话、关键证据、可信度、限制和安全的下一步调查建议。"
 	}
+	retrieved := RetrieveEvidence(question, input.Findings, input.Sessions)
+	findings := retrieved.Findings
 	evidence, _ := json.Marshal(findings)
-	sessions := input.Sessions
-	if len(sessions) > 20 {
-		sessions = sessions[:20]
-	}
+	sessions := retrieved.Sessions
 	sessionEvidence, _ := json.Marshal(sessions)
 	messages := []map[string]string{
 		{"role": "system", "content": "You are LogSleuth, a defensive incident investigation agent. Base every conclusion only on supplied evidence. Cite findings as [E#id] and correlated sessions as [S#id]. Never invent citations. Clearly separate fact, inference, confidence, and limitations. Do not provide exploit instructions. Respond in Chinese unless the user asks otherwise."},
@@ -92,10 +97,6 @@ func runAgent(input agentRequest) (string, error) {
 			messages = append(messages, map[string]string{"role": message.Role, "content": truncate(message.Content, 4000)})
 		}
 	}
-	question := strings.TrimSpace(input.Question)
-	if question == "" {
-		question = "生成首次调查报告，包括事件摘要、攻击会话、关键证据、可信度、限制和安全的下一步调查建议。"
-	}
 	messages = append(messages, map[string]string{"role": "user", "content": truncate(question, 2000)})
 	payload := map[string]any{"model": model, "temperature": 0.2, "messages": messages}
 	body, _ := json.Marshal(payload)
@@ -105,12 +106,12 @@ func runAgent(input agentRequest) (string, error) {
 	client := http.Client{Timeout: 90 * time.Second}
 	response, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("provider request: %w", err)
+		return agentResult{}, fmt.Errorf("provider request: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return "", fmt.Errorf("provider rejected request with HTTP %d", response.StatusCode)
+		return agentResult{}, fmt.Errorf("provider rejected request with HTTP %d", response.StatusCode)
 	}
 	var decoded struct {
 		Choices []struct {
@@ -120,12 +121,14 @@ func runAgent(input agentRequest) (string, error) {
 		} `json:"choices"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 4*1024*1024)).Decode(&decoded); err != nil {
-		return "", errors.New("invalid provider response")
+		return agentResult{}, errors.New("invalid provider response")
 	}
 	if len(decoded.Choices) == 0 || strings.TrimSpace(decoded.Choices[0].Message.Content) == "" {
-		return "", errors.New("provider returned no analysis")
+		return agentResult{}, errors.New("provider returned no analysis")
 	}
-	return decoded.Choices[0].Message.Content, nil
+	analysis := decoded.Choices[0].Message.Content
+	valid, invalid := ValidateCitations(analysis, input.Findings, input.Sessions)
+	return agentResult{Analysis: analysis, CitationsValid: valid, InvalidCitations: invalid, Retrieval: retrieved.Info}, nil
 }
 
 func truncate(value string, limit int) string {

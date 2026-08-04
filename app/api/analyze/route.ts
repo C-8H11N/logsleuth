@@ -44,7 +44,7 @@ export async function POST(request: Request) {
       return Response.json({ error: "The API configuration is too long." }, { status: 400 });
     }
 
-    const findings = body.findings.slice(0, 80).map((finding) => ({
+    const allFindings = body.findings.map((finding) => ({
       id: Number(finding?.id ?? 0),
       severity: String(finding?.severity ?? "Unknown").slice(0, 16),
       category: String(finding?.category ?? "Unknown").slice(0, 100),
@@ -53,14 +53,16 @@ export async function POST(request: Request) {
       method: String(finding?.method ?? "").slice(0, 12),
       path: String(finding?.path ?? "").slice(0, 500),
       status: Number(finding?.status ?? 0),
-    }));
-    const sessions = Array.isArray(body.sessions) ? body.sessions.slice(0, 20) : [];
+      evidence: String(finding?.evidence ?? "").slice(0, 1000),
+    })) as Finding[];
+    const allSessions = (Array.isArray(body.sessions) ? body.sessions : []).map((session) => ({id:Number(session?.id??0),ip:String(session?.ip??"").slice(0,100),startedAt:String(session?.startedAt??"").slice(0,80),endedAt:String(session?.endedAt??"").slice(0,80),severity:["Critical","High","Medium"].includes(session?.severity)?session.severity:"Medium",stages:Array.isArray(session?.stages)?session.stages.slice(0,10).map(String):[],evidenceIds:Array.isArray(session?.evidenceIds)?session.evidenceIds.slice(0,1000).map(Number):[],count:Number(session?.count??0),confidence:Number(session?.confidence??0)})) as AttackSession[];
     const history = Array.isArray(body.history) ? body.history.slice(-8).flatMap((message) => {
       const role = message?.role === "user" || message?.role === "assistant" ? message.role : null;
       const content = typeof message?.content === "string" ? message.content.slice(0, 4000) : "";
       return role && content ? [{ role, content }] : [];
     }) : [];
     const question = typeof body.question === "string" && body.question.trim() ? body.question.trim().slice(0, 2000) : "生成首次调查报告，包括事件摘要、攻击会话、关键证据、可信度、限制和安全的下一步调查建议。";
+    const retrieved = retrieveEvidence(question, allFindings, allSessions);
 
     const endpoint = new URL("chat/completions", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
     const response = await fetch(endpoint, {
@@ -71,7 +73,7 @@ export async function POST(request: Request) {
         temperature: 0.2,
         messages: [
           { role: "system", content: "You are LogSleuth, a defensive investigation agent. Base every conclusion only on supplied evidence. Cite findings as [E#id] and correlated sessions as [S#id]. Never invent citations. Separate fact, inference, confidence, and limitations. Do not provide exploit instructions. Respond in Chinese unless asked otherwise." },
-          { role: "user", content: `Investigation context. Findings are leads, not proof of compromise.\nFINDINGS:\n${JSON.stringify(findings)}\nCORRELATED SESSIONS:\n${JSON.stringify(sessions)}` },
+          { role: "user", content: `Investigation context. Findings are leads, not proof of compromise.\nFINDINGS:\n${JSON.stringify(retrieved.findings)}\nCORRELATED SESSIONS:\n${JSON.stringify(retrieved.sessions)}` },
           ...history,
           { role: "user", content: question },
         ],
@@ -84,8 +86,12 @@ export async function POST(request: Request) {
     const result = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
     const analysis = result.choices?.[0]?.message?.content;
     if (!analysis) return Response.json({ error: "The AI provider returned no analysis." }, { status: 502 });
-    return Response.json({ analysis });
+    const validation = validateCitations(analysis, allFindings, allSessions);
+    return Response.json({ analysis, ...validation, retrieval: retrieved.info });
   } catch {
     return Response.json({ error: "Unable to complete AI analysis." }, { status: 500 });
   }
 }
+import { retrieveEvidence, validateCitations } from "../../evidence-retrieval";
+import type { Finding } from "../../log-analyzer";
+import type { AttackSession } from "../../attack-sessions";

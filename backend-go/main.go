@@ -39,7 +39,7 @@ func cors(next http.Handler) http.Handler {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "engine": "LogSleuth Go", "version": "0.2.0"})
+		writeJSON(w, 200, map[string]string{"status": "ok", "engine": "LogSleuth Go", "version": "0.3.0"})
 	})
 	mux.HandleFunc("POST /api/v1/analyze/log", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
@@ -66,12 +66,12 @@ func main() {
 			writeJSON(w, 400, map[string]string{"error": "invalid request"})
 			return
 		}
-		analysis, err := runAgent(input)
+		result, err := runAgent(input)
 		if err != nil {
 			writeJSON(w, 502, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, 200, map[string]string{"analysis": analysis})
+		writeJSON(w, 200, result)
 	})
 	address := os.Getenv("LOGSLEUTH_GO_ADDR")
 	if address == "" {
