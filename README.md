@@ -2,6 +2,8 @@
 
 # 🕵️ LogSleuth
 
+[![CI](https://github.com/C-8H11N/logsleuth/actions/workflows/ci.yml/badge.svg)](https://github.com/C-8H11N/logsleuth/actions/workflows/ci.yml)
+
 ### 让本地 Agent 从日志与流量中重建攻击过程
 
 **Go 高性能分析引擎 · React 调查控制台 · 多模型 AI Agent · 本地优先**
