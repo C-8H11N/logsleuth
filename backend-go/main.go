@@ -39,7 +39,7 @@ func cors(next http.Handler) http.Handler {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "engine": "LogSleuth Go", "version": "0.3.0"})
+		writeJSON(w, 200, map[string]string{"status": "ok", "engine": "LogSleuth Go", "version": "0.4.0"})
 	})
 	mux.HandleFunc("POST /api/v1/analyze/log", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxUpload)

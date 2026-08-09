@@ -10,11 +10,22 @@ export type PcapFinding = {
   evidence: string;
 };
 
+export type CaptureProgress = {
+  analyzedBytes: number;
+  totalBytes: number;
+  packets: number;
+  percent: number;
+};
+
 export type PcapResult = {
   packets: number;
   findings: PcapFinding[];
   sampled: boolean;
+  complete: boolean;
   analyzedBytes: number;
+  fileBytes: number;
+  findingsTruncated: number;
+  warnings: string[];
   format: "PCAP" | "PCAPNG";
   stats: { ipv4: number; tcp: number; udp: number; dns: number; http: number; hosts: number };
 };
@@ -26,30 +37,72 @@ type ParseState = {
   udp: number;
   http: number;
   findings: PcapFinding[];
+  findingsTruncated: number;
   hosts: Set<string>;
   syn: Map<string, Set<number>>;
   dns: Map<string, number>;
+  warnings: string[];
 };
 
-const ip = (v: DataView, o: number) => `${v.getUint8(o)}.${v.getUint8(o + 1)}.${v.getUint8(o + 2)}.${v.getUint8(o + 3)}`;
-const createState = (): ParseState => ({ packets: 0, ipv4: 0, tcp: 0, udp: 0, http: 0, findings: [], hosts: new Set(), syn: new Map(), dns: new Map() });
+const CHUNK_BYTES = 8 * 1024 * 1024;
+const MAX_RECORD_BYTES = 64 * 1024 * 1024;
+const MAX_FINDINGS = 5000;
+const MAX_TRACKED_HOSTS = 250000;
+const MAX_TRACKED_SOURCES = 100000;
+const decoder = new TextDecoder("latin1");
+
+const ip = (v: DataView, o: number) =>
+  v.getUint8(o) + "." + v.getUint8(o + 1) + "." + v.getUint8(o + 2) + "." + v.getUint8(o + 3);
+
+const createState = (): ParseState => ({
+  packets: 0,
+  ipv4: 0,
+  tcp: 0,
+  udp: 0,
+  http: 0,
+  findings: [],
+  findingsTruncated: 0,
+  hosts: new Set(),
+  syn: new Map(),
+  dns: new Map(),
+  warnings: [],
+});
 
 function addFinding(state: ParseState, category: string, severity: PcapFinding["severity"], source: string, detail: string) {
-  state.findings.push({ id: state.findings.length + 1, timestamp: "Packet capture", ip: source, method: "NET", path: detail, status: 0, category, severity, evidence: detail });
+  if (state.findings.length >= MAX_FINDINGS) {
+    state.findingsTruncated++;
+    return;
+  }
+  state.findings.push({
+    id: state.findings.length + 1,
+    timestamp: "Packet capture",
+    ip: source,
+    method: "NET",
+    path: detail,
+    status: 0,
+    category,
+    severity,
+    evidence: detail,
+  });
 }
 
-function analyzeEthernetPacket(v: DataView, start: number, capturedLength: number, state: ParseState) {
-  const end = Math.min(start + capturedLength, v.byteLength);
-  if (capturedLength < 34 || start + 14 > end) return;
+function trackHost(state: ParseState, value: string) {
+  if (state.hosts.size < MAX_TRACKED_HOSTS || state.hosts.has(value)) state.hosts.add(value);
+  else if (!state.warnings.includes("Host cardinality limit reached.")) state.warnings.push("Host cardinality limit reached.");
+}
+
+function analyzeEthernetPacket(bytes: Uint8Array, state: ParseState) {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = v.byteLength;
+  if (end < 34) return;
   state.packets++;
-  let l3 = start + 14;
-  let etherType = v.getUint16(start + 12, false);
-  if (etherType === 0x8100 && start + 18 <= end) {
-    etherType = v.getUint16(start + 16, false);
+  let l3 = 14;
+  let etherType = v.getUint16(12, false);
+  if (etherType === 0x8100 && end >= 18) {
+    etherType = v.getUint16(16, false);
     l3 += 4;
   }
   if (etherType !== 0x0800 || l3 + 20 > end) return;
-
   const ihl = (v.getUint8(l3) & 15) * 4;
   if (ihl < 20 || l3 + ihl > end) return;
   const protocol = v.getUint8(l3 + 9);
@@ -57,8 +110,8 @@ function analyzeEthernetPacket(v: DataView, start: number, capturedLength: numbe
   const destination = ip(v, l3 + 16);
   const l4 = l3 + ihl;
   state.ipv4++;
-  state.hosts.add(source);
-  state.hosts.add(destination);
+  trackHost(state, source);
+  trackHost(state, destination);
   if (protocol === 6) state.tcp++;
   if (protocol === 17) state.udp++;
   if ((protocol !== 6 && protocol !== 17) || l4 + 4 > end) return;
@@ -67,89 +120,194 @@ function analyzeEthernetPacket(v: DataView, start: number, capturedLength: numbe
   const destinationPort = v.getUint16(l4 + 2, false);
   if (protocol === 6 && l4 + 14 <= end) {
     const flags = v.getUint8(l4 + 13);
-    if ((flags & 2) !== 0 && (flags & 16) === 0) {
+    if ((flags & 2) !== 0 && (flags & 16) === 0 && (state.syn.has(source) || state.syn.size < MAX_TRACKED_SOURCES)) {
       const ports = state.syn.get(source) ?? new Set<number>();
       ports.add(destinationPort);
       state.syn.set(source, ports);
     }
   }
-  if (sourcePort === 53 || destinationPort === 53) state.dns.set(source, (state.dns.get(source) ?? 0) + 1);
+  if ((sourcePort === 53 || destinationPort === 53) && (state.dns.has(source) || state.dns.size < MAX_TRACKED_SOURCES)) {
+    state.dns.set(source, (state.dns.get(source) ?? 0) + 1);
+  }
 
   if (protocol === 6 && [80, 8080, 8000].some((port) => port === sourcePort || port === destinationPort)) {
     state.http++;
     const tcpHeaderLength = l4 + 13 < end ? ((v.getUint8(l4 + 12) >> 4) & 15) * 4 : 20;
     const payloadStart = Math.min(l4 + Math.max(tcpHeaderLength, 20), end);
-    const payload = new TextDecoder("latin1").decode(new Uint8Array(v.buffer, v.byteOffset + payloadStart, Math.min(512, end - payloadStart)));
+    const payload = decoder.decode(bytes.subarray(payloadStart, Math.min(payloadStart + 512, end)));
     if (/union\s+(?:all\s+)?select|<script\b|(?:\.\.\/){2,}|(?:%2e){2}%2f|(?:cmd|powershell)(?:\.exe)?\b/i.test(payload)) {
-      addFinding(state, "Suspicious HTTP payload", "High", source, `${source}:${sourcePort} → ${destination}:${destinationPort}`);
+      addFinding(state, "Suspicious HTTP payload", "High", source, source + ":" + sourcePort + " → " + destination + ":" + destinationPort);
     }
   }
 }
 
-function finish(state: ParseState, format: PcapResult["format"], sampled: boolean, analyzedBytes: number): PcapResult {
+function finish(state: ParseState, format: PcapResult["format"], fileBytes: number, complete = true): PcapResult {
   state.syn.forEach((ports, source) => {
-    if (ports.size >= 10) addFinding(state, "Possible TCP port scan", "High", source, `SYN packets to ${ports.size} distinct destination ports`);
+    if (ports.size >= 10) addFinding(state, "Possible TCP port scan", "High", source, "SYN packets to " + ports.size + " distinct destination ports");
   });
   state.dns.forEach((count, source) => {
-    if (count >= 30) addFinding(state, "High-volume DNS activity", "Medium", source, `${count} DNS packets observed`);
+    if (count >= 30) addFinding(state, "High-volume DNS activity", "Medium", source, count + " DNS packets observed");
   });
   return {
     packets: state.packets,
     findings: state.findings,
-    sampled,
-    analyzedBytes,
+    sampled: false,
+    complete,
+    analyzedBytes: fileBytes,
+    fileBytes,
+    findingsTruncated: state.findingsTruncated,
+    warnings: state.warnings,
     format,
-    stats: { ipv4: state.ipv4, tcp: state.tcp, udp: state.udp, dns: [...state.dns.values()].reduce((a, b) => a + b, 0), http: state.http, hosts: state.hosts.size },
+    stats: {
+      ipv4: state.ipv4,
+      tcp: state.tcp,
+      udp: state.udp,
+      dns: [...state.dns.values()].reduce((a, b) => a + b, 0),
+      http: state.http,
+      hosts: state.hosts.size,
+    },
   };
 }
 
-function parsePcapng(v: DataView, sampled: boolean): PcapResult {
-  if (v.byteLength < 28) throw new Error("PCAPNG 文件不完整。");
-  const little = v.getUint32(8, true) === 0x1a2b3c4d;
-  const u32 = (offset: number) => v.getUint32(offset, little);
-  const u16 = (offset: number) => v.getUint16(offset, little);
-  const links: number[] = [];
-  const state = createState();
+function concat(left: Uint8Array, right: Uint8Array) {
+  if (!left.byteLength) return right;
+  const output = new Uint8Array(left.byteLength + right.byteLength);
+  output.set(left);
+  output.set(right, left.byteLength);
+  return output;
+}
+
+function detectFormat(header: Uint8Array): { format: PcapResult["format"]; little: boolean } {
+  if (header.byteLength < 12) throw new Error("抓包文件为空或不完整。");
+  const v = new DataView(header.buffer, header.byteOffset, header.byteLength);
+  if (v.getUint32(0, false) === 0x0a0d0d0a) {
+    const little = v.getUint32(8, true) === 0x1a2b3c4d;
+    const big = v.getUint32(8, false) === 0x1a2b3c4d;
+    if (!little && !big) throw new Error("PCAPNG 字节序标记无效。");
+    return { format: "PCAPNG", little };
+  }
+  if (header.byteLength < 24) throw new Error("PCAP 文件不完整。");
+  const littleMagic = v.getUint32(0, true);
+  const bigMagic = v.getUint32(0, false);
+  if (littleMagic === 0xa1b2c3d4 || littleMagic === 0xa1b23c4d) return { format: "PCAP", little: true };
+  if (bigMagic === 0xa1b2c3d4 || bigMagic === 0xa1b23c4d) return { format: "PCAP", little: false };
+  throw new Error("无法识别抓包格式，请上传 PCAP 或 PCAPNG 文件。");
+}
+
+function consumePcap(data: Uint8Array, little: boolean, state: ParseState, initialized: boolean) {
+  const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
-  while (offset + 12 <= v.byteLength) {
-    const type = u32(offset);
-    const length = u32(offset + 4);
-    if (length < 12 || offset + length > v.byteLength) break;
-    if (type === 1 && offset + 10 <= v.byteLength) links.push(u16(offset + 8));
-    if (type === 6 && offset + 28 <= v.byteLength) {
-      const interfaceId = u32(offset + 8);
-      const capturedLength = u32(offset + 20);
-      const start = offset + 28;
-      if (links[interfaceId] === 1 && start + capturedLength <= offset + length - 4) analyzeEthernetPacket(v, start, capturedLength, state);
+  if (!initialized) {
+    if (data.byteLength < 24) return { consumed: 0, initialized: false };
+    const linkType = v.getUint32(20, little);
+    if (linkType !== 1) throw new Error("暂不支持 PCAP 链路类型 " + linkType + "，目前支持 Ethernet。");
+    offset = 24;
+    initialized = true;
+  }
+  while (offset + 16 <= data.byteLength) {
+    const capturedLength = v.getUint32(offset + 8, little);
+    if (capturedLength > MAX_RECORD_BYTES) throw new Error("PCAP 数据包长度超过安全上限。");
+    const start = offset + 16;
+    if (start + capturedLength > data.byteLength) break;
+    analyzeEthernetPacket(data.subarray(start, start + capturedLength), state);
+    offset = start + capturedLength;
+  }
+  return { consumed: offset, initialized };
+}
+
+type PcapngContext = { little: boolean; endianKnown: boolean; links: number[] };
+
+function consumePcapng(data: Uint8Array, state: ParseState, context: PcapngContext) {
+  let offset = 0;
+  while (offset + 12 <= data.byteLength) {
+    const v = new DataView(data.buffer, data.byteOffset + offset, data.byteLength - offset);
+    const isSection = v.getUint32(0, false) === 0x0a0d0d0a;
+    if (isSection) {
+      const little = v.getUint32(8, true) === 0x1a2b3c4d;
+      const big = v.getUint32(8, false) === 0x1a2b3c4d;
+      if (!little && !big) throw new Error("PCAPNG 字节序标记无效。");
+      context.little = little;
+      context.endianKnown = true;
+    } else if (!context.endianKnown) {
+      throw new Error("PCAPNG 缺少 Section Header Block。");
+    }
+    const length = v.getUint32(4, context.little);
+    if (length < 12 || length > MAX_RECORD_BYTES) throw new Error("PCAPNG 数据块长度无效或超过安全上限。");
+    if (offset + length > data.byteLength) break;
+    const trailing = new DataView(data.buffer, data.byteOffset + offset + length - 4, 4).getUint32(0, context.little);
+    if (trailing !== length) throw new Error("PCAPNG 数据块长度校验失败。");
+    const type = v.getUint32(0, context.little);
+    if (isSection) context.links = [];
+    if (type === 1 && length >= 20) context.links.push(v.getUint16(8, context.little));
+    if (type === 6 && length >= 32) {
+      const interfaceId = v.getUint32(8, context.little);
+      const capturedLength = v.getUint32(20, context.little);
+      const start = 28;
+      if (capturedLength > MAX_RECORD_BYTES) throw new Error("PCAPNG 数据包长度超过安全上限。");
+      if (context.links[interfaceId] === 1 && start + capturedLength <= length - 4) {
+        analyzeEthernetPacket(data.subarray(offset + start, offset + start + capturedLength), state);
+      }
     }
     offset += length;
   }
-  return finish(state, "PCAPNG", sampled, v.byteLength);
+  return offset;
 }
 
-function parsePcap(v: DataView, sampled: boolean, little: boolean): PcapResult {
-  if (v.byteLength < 24) throw new Error("PCAP 文件不完整。");
+export function parseCapture(buffer: ArrayBuffer): PcapResult {
+  const bytes = new Uint8Array(buffer);
+  const detected = detectFormat(bytes);
   const state = createState();
-  const linkType = v.getUint32(20, little);
-  if (linkType !== 1) throw new Error(`暂不支持 PCAP 链路类型 ${linkType}，目前支持 Ethernet。`);
-  let offset = 24;
-  while (offset + 16 <= v.byteLength) {
-    const capturedLength = v.getUint32(offset + 8, little);
-    const start = offset + 16;
-    if (capturedLength > v.byteLength - start) break;
-    analyzeEthernetPacket(v, start, capturedLength, state);
-    offset = start + capturedLength;
+  if (detected.format === "PCAP") {
+    const parsed = consumePcap(bytes, detected.little, state, false);
+    const complete = parsed.consumed === bytes.byteLength;
+    if (!complete) state.warnings.push("Trailing incomplete PCAP record was ignored.");
+    return finish(state, "PCAP", bytes.byteLength, complete);
   }
-  return finish(state, "PCAP", sampled, v.byteLength);
+  const context: PcapngContext = { little: detected.little, endianKnown: true, links: [] };
+  const consumed = consumePcapng(bytes, state, context);
+  const complete = consumed === bytes.byteLength;
+  if (!complete) state.warnings.push("Trailing incomplete PCAPNG block was ignored.");
+  return finish(state, "PCAPNG", bytes.byteLength, complete);
 }
 
-export function parseCapture(buffer: ArrayBuffer, sampled = false): PcapResult {
-  const v = new DataView(buffer);
-  if (v.byteLength < 4) throw new Error("抓包文件为空或不完整。");
-  if (v.getUint32(0, false) === 0x0a0d0d0a) return parsePcapng(v, sampled);
-  const littleMagic = v.getUint32(0, true);
-  const bigMagic = v.getUint32(0, false);
-  if (littleMagic === 0xa1b2c3d4 || littleMagic === 0xa1b23c4d) return parsePcap(v, sampled, true);
-  if (bigMagic === 0xa1b2c3d4 || bigMagic === 0xa1b23c4d) return parsePcap(v, sampled, false);
-  throw new Error("无法识别抓包格式，请上传 PCAP 或 PCAPNG 文件。");
+export async function parseCaptureFile(
+  file: File,
+  onProgress?: (progress: CaptureProgress) => void,
+  signal?: AbortSignal,
+): Promise<PcapResult> {
+  if (!file.size) throw new Error("抓包文件为空。");
+  const header = new Uint8Array(await file.slice(0, 32).arrayBuffer());
+  const detected = detectFormat(header);
+  const state = createState();
+  const pcapng: PcapngContext = { little: detected.little, endianKnown: detected.format === "PCAPNG", links: [] };
+  let initialized = false;
+  let carry = new Uint8Array(0);
+  let readOffset = 0;
+  while (readOffset < file.size) {
+    if (signal?.aborted) throw new DOMException("Analysis cancelled.", "AbortError");
+    const end = Math.min(file.size, readOffset + CHUNK_BYTES);
+    const chunk = new Uint8Array(await file.slice(readOffset, end).arrayBuffer());
+    const data = concat(carry, chunk);
+    let consumed = 0;
+    if (detected.format === "PCAP") {
+      const result = consumePcap(data, detected.little, state, initialized);
+      consumed = result.consumed;
+      initialized = result.initialized;
+    } else {
+      consumed = consumePcapng(data, state, pcapng);
+    }
+    carry = data.slice(consumed);
+    if (carry.byteLength > MAX_RECORD_BYTES) throw new Error("抓包中存在超过安全上限的未完成数据块。");
+    readOffset = end;
+    onProgress?.({
+      analyzedBytes: readOffset,
+      totalBytes: file.size,
+      packets: state.packets,
+      percent: Math.min(100, Math.round((readOffset / file.size) * 100)),
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  const complete = carry.byteLength === 0;
+  if (!complete) state.warnings.push("文件末尾存在不完整的数据包或数据块，已忽略尾部残片。");
+  return finish(state, detected.format, file.size, complete);
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { parseCapture, type PcapResult } from "./pcapng";
+import { parseCaptureFile, type CaptureProgress, type PcapResult } from "./pcapng";
 import { analyzeLog, type Finding } from "./log-analyzer";
 import { correlateSessions, type AttackSession } from "./attack-sessions";
 
@@ -79,10 +79,12 @@ export default function Home() {
   const [agentError, setAgentError] = useState("");
   const [agentLoading, setAgentLoading] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
+  const [captureProgress, setCaptureProgress] = useState<CaptureProgress | null>(null);
+  const [captureController, setCaptureController] = useState<AbortController | null>(null);
   const [engineOnline, setEngineOnline] = useState(false);
   const t = copy[language];
   const textResult = useMemo(() => analyzeLog(content), [content]);
-  const result = useMemo(() => pcapResult ? { parsed: Array(pcapResult.packets).fill({}), findings: pcapResult.findings } : backendResult ? { parsed: Array(backendResult.parsedCount).fill({}), findings: backendResult.findings } : textResult, [pcapResult, backendResult, textResult]);
+  const result = useMemo(() => pcapResult ? { parsedCount: pcapResult.packets, findings: pcapResult.findings } : backendResult ? { parsedCount: backendResult.parsedCount, findings: backendResult.findings } : { parsedCount: textResult.parsed.length, findings: textResult.findings }, [pcapResult, backendResult, textResult]);
   const filtered = useMemo(() => result.findings.filter((item) => selected === "All" || item.severity === selected), [result.findings, selected]);
   const groupedFindings = useMemo(() => groupConsecutive(filtered), [filtered]);
   const topIps = useMemo(() => [...new Set(result.findings.map((item) => item.ip))].map((ip) => ({ ip, count: result.findings.filter((item) => item.ip === ip).length })).sort((a, b) => b.count - a.count).slice(0, 4), [result.findings]);
@@ -96,7 +98,7 @@ export default function Home() {
   }, []);
 
   function resetAgent() { setAgentMessages([]); setAgentQuestion(""); setAgentError(""); }
-  function loadText(text: string, name: string) { setPcapResult(null); setBackendResult(null); setContent(text); setFileName(name); resetAgent(); }
+  function loadText(text: string, name: string) { setPcapResult(null); setBackendResult(null); setContent(text); setFileName(name); setCaptureProgress(null); resetAgent(); }
   function readLogInBrowser(file: File) {
     const reader = new FileReader();
     reader.onload = () => { loadText(String(reader.result ?? ""), file.name); setFileLoading(false); };
@@ -107,15 +109,26 @@ export default function Home() {
     const file = event.target.files?.[0];
     if (!file) return;
     if (/\.pcap(?:ng)?$/i.test(file.name)) {
-      const sampleLimit = 32 * 1024 * 1024;
-      file.slice(0, sampleLimit).arrayBuffer().then((data) => {
-        const parsed = parseCapture(data, file.size > sampleLimit);
+      const controller = new AbortController();
+      setCaptureController(controller);
+      setFileLoading(true);
+      setCaptureProgress({ analyzedBytes: 0, totalBytes: file.size, packets: 0, percent: 0 });
+      setContent("");
+      setBackendResult(null);
+      setPcapResult(null);
+      setFileName(file.name);
+      resetAgent();
+      parseCaptureFile(file, setCaptureProgress, controller.signal).then((parsed) => {
         setContent("");
         setBackendResult(null);
         setPcapResult(parsed);
-        setFileName(file.name);
-        resetAgent();
-      }).catch((error) => setAgentError(error instanceof Error ? error.message : "抓包解析失败。"));
+      }).catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") setAgentError(language === "zh" ? "抓包分析已取消。" : "Capture analysis cancelled.");
+        else setAgentError(error instanceof Error ? error.message : "抓包解析失败。");
+      }).finally(() => {
+        setFileLoading(false);
+        setCaptureController(null);
+      });
       return;
     }
     setFileLoading(true);
@@ -129,10 +142,33 @@ export default function Home() {
     }).catch(() => readLogInBrowser(file));
   }
   function downloadReport() {
-    const body = [`# ${t.reportTitle}`, ``, `- ${t.source}: ${fileName}`, `- ${t.parsed}: ${result.parsed.length}`, `- ${t.reportFindings}: ${result.findings.length}`, `- ${t.reportRisk}: ${riskScore}/100`, ``, `## ${t.reportSection}`, ...result.findings.map((item) => `- **${item.severity} · ${language === "zh" ? zhCategories[item.category] : item.category}** — ${item.timestamp} — ${item.ip} — \`${item.method} ${item.path}\` (HTTP ${item.status})`)].join("\n");
+    const body = [`# ${t.reportTitle}`, ``, `- ${t.source}: ${fileName}`, `- ${t.parsed}: ${result.parsedCount}`, `- ${t.reportFindings}: ${result.findings.length}`, `- ${t.reportRisk}: ${riskScore}/100`, ``, `## ${t.reportSection}`, ...result.findings.map((item) => `- **${item.severity} · ${language === "zh" ? zhCategories[item.category] : item.category}** — ${item.timestamp} — ${item.ip} — \`${item.method} ${item.path}\` (HTTP ${item.status})`)].join("\n");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([body], { type: "text/markdown" }));
     link.download = "logsleuth-report.md";
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+  function downloadAnalysisJSON() {
+    const payload = {
+      schema: "logsleuth-analysis/1.0",
+      generated_at: new Date().toISOString(),
+      tool: { name: "LogSleuth", version: "0.4.0" },
+      source: {
+        filename: fileName,
+        kind: pcapResult ? "packet-capture" : "web-access-log",
+        parsed_count: result.parsedCount,
+        complete: pcapResult?.complete ?? true,
+        analyzed_bytes: pcapResult?.analyzedBytes ?? null,
+        warnings: pcapResult?.warnings ?? [],
+      },
+      summary: { risk_score: riskScore, finding_count: result.findings.length, session_count: attackSessions.length },
+      findings: result.findings,
+      sessions: attackSessions,
+    };
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    link.download = "logsleuth-analysis.json";
     link.click();
     URL.revokeObjectURL(link.href);
   }
@@ -180,14 +216,16 @@ export default function Home() {
       <h1>{t.hero}</h1>
       <p>{t.intro}</p>
       <div className="actions">
-        <label className="button primary">{fileLoading ? "正在分析…" : t.upload}<input aria-label={t.upload} disabled={fileLoading} type="file" accept=".log,.txt,.pcap,.pcapng,text/plain,application/vnd.tcpdump.pcap" onChange={onFile} /></label>
+        <label className="button primary">{fileLoading ? (language === "zh" ? "正在分析…" : "Analyzing…") : t.upload}<input aria-label={t.upload} disabled={fileLoading} type="file" accept=".log,.txt,.pcap,.pcapng,text/plain,application/vnd.tcpdump.pcap" onChange={onFile} /></label>
+        {captureController && <button className="button" type="button" onClick={() => captureController.abort()}>{language === "zh" ? "取消分析" : "Cancel"}</button>}
         <button className="button" onClick={() => loadText(SAMPLE_LOG, "demo-access.log")}>{t.demo}</button>
       </div>
       <div className="scope-note">{t.scope} · 支持 `.pcap` / `.pcapng` 基础网络取证</div>
     </section>
 
     <section className="dashboard" aria-live="polite">
-      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsed.length.toLocaleString()} {pcapResult?"个网络包":t.requests}</span>{backendResult && <span>{backendResult.unreadableLines.toLocaleString()} 行未识别</span>}<span className={`engine-state ${engineOnline ? "online" : "fallback"}`}>{engineOnline ? "GO ENGINE" : "BROWSER MODE"}</span><button className="report" disabled={!content&&!pcapResult} onClick={downloadReport}>{t.export}</button></div>
+      <div className="source-row"><span className="source-dot" /> <strong>{fileName || t.noLog}</strong><span>{result.parsedCount.toLocaleString()} {pcapResult ? (language === "zh" ? "个网络包" : "packets") : t.requests}</span>{backendResult && <span>{backendResult.unreadableLines.toLocaleString()} 行未识别</span>}<span className={`engine-state ${engineOnline ? "online" : "fallback"}`}>{engineOnline ? "GO ENGINE" : "BROWSER MODE"}</span><button className="report" disabled={!content&&!pcapResult} onClick={downloadAnalysisJSON}>{language === "zh" ? "导出调查 JSON" : "Export investigation JSON"}</button><button className="report" disabled={!content&&!pcapResult} onClick={downloadReport}>{t.export}</button></div>
+      {fileLoading && captureProgress && <article className="capture-progress" aria-live="polite"><div><strong>{language === "zh" ? "正在扫描完整抓包" : "Scanning full capture"}</strong><span>{captureProgress.percent}% · {(captureProgress.analyzedBytes/1024/1024).toFixed(1)} / {(captureProgress.totalBytes/1024/1024).toFixed(1)} MiB · {captureProgress.packets.toLocaleString()} {language === "zh" ? "个包" : "packets"}</span></div><progress max="100" value={captureProgress.percent}/></article>}
       {!content&&!pcapResult ? <div className="empty"><div className="empty-mark">⌁</div><h2>{t.start}</h2><p>{t.empty} 也可上传 `.pcap` / `.pcapng` 抓包文件。</p></div> : <>
         <div className="metrics">
           <article><span>{t.risk}</span><strong className={riskScore > 60 ? "danger" : ""}>{riskScore}<small>/100</small></strong><em>{riskScore > 60 ? t.review : t.safe}</em></article>
@@ -195,7 +233,7 @@ export default function Home() {
           <article><span>{t.sources}</span><strong>{topIps.length}</strong><em>{t.sourceHint}</em></article>
           <article><span>{t.highest}</span><strong className="severity-word">{result.findings[0]?.severity ?? "—"}</strong><em>{t.localRules}</em></article>
         </div>
-        {pcapResult && <article className="panel pcap-summary"><div><span className="label">{pcapResult.format} 流量基线{pcapResult.sampled ? ` · 前 ${(pcapResult.analyzedBytes / 1024 / 1024).toFixed(0)} MiB 采样` : ""}</span><h2>{pcapResult.findings.length ? "已发现需要调查的网络活动" : "解析成功，当前规则未发现明显异常"}</h2></div><div className="pcap-counters"><span><strong>{pcapResult.stats.ipv4}</strong>IPv4</span><span><strong>{pcapResult.stats.tcp}</strong>TCP</span><span><strong>{pcapResult.stats.udp}</strong>UDP</span><span><strong>{pcapResult.stats.dns}</strong>DNS</span><span><strong>{pcapResult.stats.http}</strong>HTTP</span><span><strong>{pcapResult.stats.hosts}</strong>主机</span></div></article>}
+        {pcapResult && <article className="panel pcap-summary"><div><span className="label">{pcapResult.format} · {language === "zh" ? "完整文件扫描" : "FULL-FILE SCAN"} · {(pcapResult.analyzedBytes/1024/1024).toFixed(1)} MiB</span><h2>{pcapResult.findings.length ? (language === "zh" ? "已发现需要调查的网络活动" : "Network activity requires investigation") : (language === "zh" ? "解析成功，当前规则未发现明显异常" : "Parsed successfully; no high-signal anomaly matched")}</h2>{(!pcapResult.complete || pcapResult.warnings.length > 0 || pcapResult.findingsTruncated > 0) && <p className="pcap-warning">{language === "zh" ? "解析提示：" : "Parser notice: "}{[...pcapResult.warnings, pcapResult.findingsTruncated ? pcapResult.findingsTruncated + " findings omitted after the safety cap." : ""].filter(Boolean).join(" ")}</p>}</div><div className="pcap-counters"><span><strong>{pcapResult.stats.ipv4}</strong>IPv4</span><span><strong>{pcapResult.stats.tcp}</strong>TCP</span><span><strong>{pcapResult.stats.udp}</strong>UDP</span><span><strong>{pcapResult.stats.dns}</strong>DNS</span><span><strong>{pcapResult.stats.http}</strong>HTTP</span><span><strong>{pcapResult.stats.hosts}</strong>{language === "zh" ? "主机" : "Hosts"}</span></div></article>}
         {attackSessions.length > 0 && <article className="panel session-panel"><div className="panel-head"><div><span className="label">CORRELATED ATTACK SESSIONS</span><h2>{language === "zh" ? "自动关联的攻击会话" : "Correlated attack sessions"}</h2></div><span className="session-total">{attackSessions.length} {language === "zh" ? "个会话" : "sessions"}</span></div><p className="muted session-note">{language === "zh" ? "按来源 IP 和 30 分钟活动窗口关联。可信度表示行为相关程度，不代表攻击已经成功。" : "Grouped by source IP and a 30-minute activity window. Confidence measures correlation, not successful compromise."}</p><div className="session-grid">{attackSessions.slice(0,8).map((session)=><details className="session-card" id={`attack-session-${session.id}`} key={session.id}><summary><span className={`severity ${session.severity.toLowerCase()}`}>{session.severity}</span><div><strong>S#{session.id} · <code>{session.ip}</code></strong><small>{session.startedAt} → {session.endedAt}</small></div><span className="confidence"><b>{session.confidence}%</b>{language === "zh" ? "关联度" : "confidence"}</span></summary><div className="session-body"><div className="stage-list">{session.stages.map((stage)=><span key={stage}>{language === "zh" ? zhStages[stage] ?? stage : stage}</span>)}</div><p>{session.count} {language === "zh" ? "条关联证据" : "correlated findings"}</p><div className="evidence-links">{session.evidenceIds.slice(0,12).map((id)=><button type="button" onClick={()=>focusEvidence(id)} key={id}>E#{id}</button>)}{session.evidenceIds.length>12&&<span>+{session.evidenceIds.length-12}</span>}</div></div></details>)}</div>{attackSessions.length>8&&<p className="muted session-more">{language === "zh" ? `当前展示关联度最高的 8 个会话，其余 ${attackSessions.length-8} 个会话仍会提供给 Agent。` : `Showing the top 8 sessions; ${attackSessions.length-8} more remain available to the agent.`}</p>}</article>}
         <div className="grid">
           <article className="panel timeline"><div className="panel-head"><div><span className="label">{t.timeline}</span><h2>{t.events}</h2></div><div className="filters">{(["All", "Critical", "High", "Medium"] as const).map((level) => <button key={level} className={selected === level ? "active" : ""} onClick={() => setSelected(level)}>{level}</button>)}</div></div>
