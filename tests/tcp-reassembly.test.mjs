@@ -34,6 +34,23 @@ test("limits and conflicting retransmissions are observable", () => {
   assert.equal(tcp.stats.limitedFlows, 1);
 });
 
+test("packet provenance is bounded and limits taint subsequent windows", () => {
+  const evidence = [];
+  const tcp = new TcpReassembly((_, __, item) => evidence.push(item));
+  for (let packet = 1; packet <= 70; packet++) tcp.push("a", packet, bytes("x"), { packet, timestamp: null, epochNanoseconds: null });
+  tcp.finish();
+  assert.equal(evidence[0].packets.length, 64);
+  assert.equal(evidence[0].packetCount, 70);
+  assert.equal(evidence[0].lastPacket, 70);
+  const limited = [];
+  const small = new TcpReassembly((_, __, item) => limited.push(item), 4, 8, 2, 2);
+  small.push("a", 0, bytes("abcd"));
+  small.push("a", 4, bytes("ef"));
+  small.push("b", 0, bytes("ok"));
+  small.finish();
+  assert.ok(limited.every((item) => item.uncertain));
+});
+
 function capture(parts) {
   const packets = parts.map(([seq, text]) => {
     const body = bytes(text);

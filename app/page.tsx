@@ -4,6 +4,7 @@ import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { parseCaptureFile, type CaptureProgress, type PcapResult } from "./pcapng";
 import { analyzeLog, type Finding } from "./log-analyzer";
 import { correlateSessions, type AttackSession } from "./attack-sessions";
+import { CaptureEvidencePanel } from "./capture-evidence";
 
 type Provider = "openai" | "deepseek" | "qwen" | "kimi" | "custom";
 type ApiConfig = { apiKey: string; baseUrl: string; model: string };
@@ -53,6 +54,9 @@ const zhCategories: Record<string, string> = {
   "Log4Shell/JNDI probe": "Log4Shell/JNDI 探测",
   "Web shell probing": "WebShell 探测",
   "SSRF probe": "SSRF 探测",
+  "Suspicious HTTP payload": "可疑 HTTP 请求内容",
+  "Possible TCP port scan": "疑似 TCP 端口扫描",
+  "High-volume DNS activity": "高频 DNS 活动",
 };
 const zhStages:Record<string,string>={"Reconnaissance":"侦察","Credential Access":"凭据访问","Persistence":"持久化","Exploitation":"利用尝试","Suspicious Activity":"可疑活动"};
 
@@ -165,6 +169,7 @@ export default function Home() {
       summary: { risk_score: riskScore, finding_count: result.findings.length, session_count: attackSessions.length },
       findings: result.findings,
       sessions: attackSessions,
+      capture: pcapResult ? { http_observations: pcapResult.httpObservations, http_analysis: pcapResult.httpAnalysis } : null,
     };
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
@@ -235,6 +240,7 @@ export default function Home() {
         </div>
         {pcapResult && <article className="panel pcap-summary"><div><span className="label">{pcapResult.format} · {language === "zh" ? "完整文件扫描" : "FULL-FILE SCAN"} · {(pcapResult.analyzedBytes/1024/1024).toFixed(1)} MiB</span><h2>{pcapResult.findings.length ? (language === "zh" ? "已发现需要调查的网络活动" : "Network activity requires investigation") : (language === "zh" ? "解析成功，当前规则未发现明显异常" : "Parsed successfully; no high-signal anomaly matched")}</h2>{(!pcapResult.complete || pcapResult.warnings.length > 0 || pcapResult.findingsTruncated > 0) && <p className="pcap-warning">{language === "zh" ? "解析提示：" : "Parser notice: "}{[...pcapResult.warnings, pcapResult.findingsTruncated ? pcapResult.findingsTruncated + " findings omitted after the safety cap." : ""].filter(Boolean).join(" ")}</p>}</div><div className="pcap-counters"><span><strong>{pcapResult.stats.ipv4}</strong>IPv4</span><span><strong>{pcapResult.stats.tcp}</strong>TCP</span><span><strong>{pcapResult.stats.udp}</strong>UDP</span><span><strong>{pcapResult.stats.dns}</strong>DNS</span><span><strong>{pcapResult.stats.http}</strong>HTTP</span><span><strong>{pcapResult.stats.hosts}</strong>{language === "zh" ? "主机" : "Hosts"}</span></div></article>}
         {attackSessions.length > 0 && <article className="panel session-panel"><div className="panel-head"><div><span className="label">CORRELATED ATTACK SESSIONS</span><h2>{language === "zh" ? "自动关联的攻击会话" : "Correlated attack sessions"}</h2></div><span className="session-total">{attackSessions.length} {language === "zh" ? "个会话" : "sessions"}</span></div><p className="muted session-note">{language === "zh" ? "按来源 IP 和 30 分钟活动窗口关联。可信度表示行为相关程度，不代表攻击已经成功。" : "Grouped by source IP and a 30-minute activity window. Confidence measures correlation, not successful compromise."}</p><div className="session-grid">{attackSessions.slice(0,8).map((session)=><details className="session-card" id={`attack-session-${session.id}`} key={session.id}><summary><span className={`severity ${session.severity.toLowerCase()}`}>{session.severity}</span><div><strong>S#{session.id} · <code>{session.ip}</code></strong><small>{session.startedAt} → {session.endedAt}</small></div><span className="confidence"><b>{session.confidence}%</b>{language === "zh" ? "关联度" : "confidence"}</span></summary><div className="session-body"><div className="stage-list">{session.stages.map((stage)=><span key={stage}>{language === "zh" ? zhStages[stage] ?? stage : stage}</span>)}</div><p>{session.count} {language === "zh" ? "条关联证据" : "correlated findings"}</p><div className="evidence-links">{session.evidenceIds.slice(0,12).map((id)=><button type="button" onClick={()=>focusEvidence(id)} key={id}>E#{id}</button>)}{session.evidenceIds.length>12&&<span>+{session.evidenceIds.length-12}</span>}</div></div></details>)}</div>{attackSessions.length>8&&<p className="muted session-more">{language === "zh" ? `当前展示关联度最高的 8 个会话，其余 ${attackSessions.length-8} 个会话仍会提供给 Agent。` : `Showing the top 8 sessions; ${attackSessions.length-8} more remain available to the agent.`}</p>}</article>}
+        {pcapResult && <CaptureEvidencePanel result={pcapResult} language={language} />}
         <div className="grid">
           <article className="panel timeline"><div className="panel-head"><div><span className="label">{t.timeline}</span><h2>{t.events}</h2></div><div className="filters">{(["All", "Critical", "High", "Medium"] as const).map((level) => <button key={level} className={selected === level ? "active" : ""} onClick={() => setSelected(level)}>{level}</button>)}</div></div>
             {groupedFindings.length ? <ol>{groupedFindings.map((group) => {

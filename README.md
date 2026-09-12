@@ -52,7 +52,8 @@ LogSleuth 是一个面向防御调查的本地安全工作台。它使用 Go 流
 | 引用真实性校验 | ✅ | 自动验证模型返回的 `[E#]` / `[S#]`，不存在的引用会标红并禁止跳转 |
 | 双语界面 | ✅ | 中文 / English 一键切换 |
 | 调查报告 | ✅ | 导出 Markdown 调查报告 |
-| TCP 流重组 | ✅ | 有界单向窗口：乱序、重传、序列号回绕；缺口和冲突提示，尚非完整 HTTP 会话解析 |
+| TCP 流重组 | ✅ | 有界单向窗口：乱序、重传、序列号回绕；缺口和冲突提示 |
+| HTTP 证据关联 | ✅ | 保守配对单次 HTTP/1.x 请求/响应，导出窗口包引用与抓包时间 |
 | 自定义 YAML 规则 | 🧭 | 规划中 |
 | Windows 桌面版 | 🧭 | 规划中 |
 
@@ -64,9 +65,19 @@ LogSleuth 是一个面向防御调查的本地安全工作台。它使用 Go 流
 
 TCP payloads are reconstructed in bounded directional windows before plaintext HTTP/1.x detection, including on nonstandard ports. Limits: 256 KiB and 2048 segments per window, 16 MiB total buffered payload, 2048 directions. Limits, gaps and conflicting overlaps are reported; these are payload budgets, not a total application memory guarantee.
 
-限制 / Limitations: 不跨缺口拼接，不解密 TLS，不重组 IP 分片，不支持 IPv6；窗口边界可能漏检。HTTP 统计表示包含可识别 HTTP 的连续窗口数，不是精确请求数。请求/响应关联、PCAP 时间戳与包编号证据仍待实现。Conflicting overlaps require manual review; absence of findings does not prove safety. HTTP counts represent recognized contiguous windows, not exact transactions. Request/response correlation and packet-level provenance remain future work.
+新增 HTTP 证据面板：上传后展开 H# 条目，查看方法、隐藏查询值的路径、响应状态、推断配对、接口范围和窗口包编号。调查 JSON 的 `capture.http_observations` 保留最多 5000 条消息；页面显示前 12 条。每个方向窗口最多解析 128 条消息，同时最多维护 2048 个待关联连接。遇到上限会报告省略事件数量（不是精确省略消息数）。TCP 达到窗口上限后，后续窗口保守标为不确定，不再强制配对。
 
-离线测试 / Offline tests: `node --test --test-isolation=none tests/tcp-reassembly.test.mjs` (Node.js 24).
+HTTP evidence panel: expand H# entries after upload to inspect method, query-redacted path, response status, inferred pair, interface scope and window packet numbers. Exported investigation JSON includes up to 5000 messages under `capture.http_observations`; the page shows 12. Limits: 128 messages per directional window and 2048 pending connections. Omission counts describe limit events, not an exact number of skipped messages. Once a TCP window limit is reached, subsequent windows are conservatively marked uncertain and not paired.
+
+时间与引用 / Time and provenance: PCAP 支持微秒/纳秒和大小端；PCAPNG Enhanced Packet Block 支持每个接口的十进制/二进制 `if_tsresol` 及带符号 `if_tsoffset`。界面时间为 UTC 毫秒；JSON 的 `epochNanoseconds` 为十进制字符串，亚纳秒精度向下截断。每个窗口最多保留前 64 个包引用，范围不表示其中所有编号都属于该连接。PCAP micro/nanosecond timestamps and PCAPNG interface resolution/offset are retained (UTC milliseconds for display, nanosecond strings in JSON). Packet references are window-level, not exact byte-to-message attribution; retransmissions and multiple messages can share the same window. Subnanosecond precision is truncated.
+
+边界 / Limitations: 不跨缺口拼接、不解密 TLS、不重组 IP 分片、不支持 IPv6。仅配对同一接口、同一连接周期内、无缺口/冲突/截断且包顺序明确的单次请求和最终响应；多请求连接、HEAD/CONNECT、chunked、歧义长度和依赖连接关闭定界的响应不强制配对。HTTP 计数表示识别到的消息数，不是完整流量总量。No gap bridging, TLS decryption, IP fragmentation or IPv6 support. Only a single unambiguous request/final response per connection epoch is conservatively paired. Multiple-request connections, HEAD/CONNECT, chunked or ambiguous/close-delimited bodies remain unpaired. HTTP counts reflect retained recognized messages, not total traffic. A successful status code does not establish exploitation; all findings require review.
+
+隐私 / Privacy: HTTP 观察记录不保存请求头、正文、查询值或 URL 用户信息；仍可能包含路径中的敏感信息，分享前需复核。原始抓包只在本机分析。HTTP observations omit headers, bodies, query values and URL userinfo; paths can still contain sensitive values. Review exports before sharing. These changes do not alter the handling of ordinary access logs.
+
+协议参考 / Protocol references: [HTTP/1.1 framing (RFC 9112)](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3), [PCAPNG interface timestamps](https://www.ietf.org/archive/id/draft-ietf-opsawg-pcapng-05.html).
+
+离线测试 / Offline tests: `node --test --test-isolation=none tests/tcp-reassembly.test.mjs tests/http-evidence.test.mjs tests/capture-evidence-ui.test.mjs` (Node.js 24). All capture fixtures are synthetic; tests make no external target requests.
 
 Agent 不是简单复述告警，而是围绕证据完成调查整理：
 
