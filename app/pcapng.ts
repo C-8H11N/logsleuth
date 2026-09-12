@@ -1,3 +1,5 @@
+import { TcpReassembly } from "./tcp-reassembly.ts";
+
 export type PcapFinding = {
   id: number;
   timestamp: string;
@@ -31,6 +33,7 @@ export type PcapResult = {
 };
 
 type ParseState = {
+  reassembly?: TcpReassembly;
   packets: number;
   ipv4: number;
   tcp: number;
@@ -93,9 +96,9 @@ function trackHost(state: ParseState, value: string) {
 
 function analyzeEthernetPacket(bytes: Uint8Array, state: ParseState) {
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const end = v.byteLength;
-  if (end < 34) return;
+  let end = v.byteLength;
   state.packets++;
+  if (end < 34) return;
   let l3 = 14;
   let etherType = v.getUint16(12, false);
   if (etherType === 0x8100 && end >= 18) {
@@ -105,6 +108,18 @@ function analyzeEthernetPacket(bytes: Uint8Array, state: ParseState) {
   if (etherType !== 0x0800 || l3 + 20 > end) return;
   const ihl = (v.getUint8(l3) & 15) * 4;
   if (ihl < 20 || l3 + ihl > end) return;
+  const totalLength = v.getUint16(l3 + 2, false);
+  if (totalLength < ihl) return;
+  if (l3 + totalLength > end) {
+    const warning = "截断的 IPv4 包 / Truncated IPv4 packet.";
+    if (!state.warnings.includes(warning)) state.warnings.push(warning);
+  }
+  end = Math.min(end, l3 + totalLength);
+  if ((v.getUint16(l3 + 6, false) & 0x3fff) !== 0) {
+    const warning = "未重组 IP 分片 / IP fragments were not reassembled.";
+    if (!state.warnings.includes(warning)) state.warnings.push(warning);
+    return;
+  }
   const protocol = v.getUint8(l3 + 9);
   const source = ip(v, l3 + 12);
   const destination = ip(v, l3 + 16);
@@ -130,18 +145,31 @@ function analyzeEthernetPacket(bytes: Uint8Array, state: ParseState) {
     state.dns.set(source, (state.dns.get(source) ?? 0) + 1);
   }
 
-  if (protocol === 6 && [80, 8080, 8000].some((port) => port === sourcePort || port === destinationPort)) {
-    state.http++;
-    const tcpHeaderLength = l4 + 13 < end ? ((v.getUint8(l4 + 12) >> 4) & 15) * 4 : 20;
-    const payloadStart = Math.min(l4 + Math.max(tcpHeaderLength, 20), end);
-    const payload = decoder.decode(bytes.subarray(payloadStart, Math.min(payloadStart + 512, end)));
-    if (/union\s+(?:all\s+)?select|<script\b|(?:\.\.\/){2,}|(?:%2e){2}%2f|(?:cmd|powershell)(?:\.exe)?\b/i.test(payload)) {
-      addFinding(state, "Suspicious HTTP payload", "High", source, source + ":" + sourcePort + " → " + destination + ":" + destinationPort);
-    }
+  if (protocol === 6 && l4 + 20 <= end) {
+    const headerLength = (v.getUint8(l4 + 12) >> 4) * 4;
+    if (headerLength < 20 || l4 + headerLength > end) return;
+    const key = source + ":" + sourcePort + " → " + destination + ":" + destinationPort;
+    state.reassembly ??= new TcpReassembly((connection, data) => {
+      const payload = decoder.decode(data);
+      if (!/^(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH|CONNECT|TRACE)\s+\S+\s+HTTP\/1\.[01]\r\n|^HTTP\/1\.[01]\s+\d{3}\b/m.test(payload)) return;
+      state.http++;
+      if (/union\s+(?:all\s+)?select|<script\b|(?:\.\.\/){2,}|(?:%2e){2}%2f|(?:cmd|powershell)(?:\.exe)?\b/i.test(payload)) {
+        addFinding(state, "Suspicious HTTP payload", "High", connection.split(":")[0], connection);
+      }
+    });
+    const flags = v.getUint8(l4 + 13);
+    if (flags & 2) state.reassembly.flush(key);
+    state.reassembly.push(key, (v.getUint32(l4 + 4, false) + ((flags & 2) ? 1 : 0)) >>> 0, bytes.subarray(l4 + headerLength, end));
   }
 }
 
 function finish(state: ParseState, format: PcapResult["format"], fileBytes: number, complete = true): PcapResult {
+  state.reassembly?.finish();
+  const transport = state.reassembly?.stats;
+  state.warnings.push("仅分析 Ethernet/IPv4 明文流量；TLS 未解密。全文件读取不等于完整协议覆盖。 / Ethernet/IPv4 plaintext only; TLS is not decrypted. Full-file reading does not imply full protocol coverage.");
+  if (transport?.gaps) state.warnings.push(`TCP 缺口 / TCP gaps: ${transport.gaps}`);
+  if (transport?.limitedFlows) state.warnings.push(`TCP 内存窗口截断 / TCP window limits: ${transport.limitedFlows}`);
+  if (transport?.conflicts) state.warnings.push(`TCP 重叠内容冲突，需人工复核 / Conflicting TCP overlaps, review required: ${transport.conflicts}`);
   state.syn.forEach((ports, source) => {
     if (ports.size >= 10) addFinding(state, "Possible TCP port scan", "High", source, "SYN packets to " + ports.size + " distinct destination ports");
   });

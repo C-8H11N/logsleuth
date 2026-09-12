@@ -52,11 +52,21 @@ LogSleuth 是一个面向防御调查的本地安全工作台。它使用 Go 流
 | 引用真实性校验 | ✅ | 自动验证模型返回的 `[E#]` / `[S#]`，不存在的引用会标红并禁止跳转 |
 | 双语界面 | ✅ | 中文 / English 一键切换 |
 | 调查报告 | ✅ | 导出 Markdown 调查报告 |
-| TCP 流重组 | 🧭 | 规划中 |
+| TCP 流重组 | ✅ | 有界单向窗口：乱序、重传、序列号回绕；缺口和冲突提示，尚非完整 HTTP 会话解析 |
 | 自定义 YAML 规则 | 🧭 | 规划中 |
 | Windows 桌面版 | 🧭 | 规划中 |
 
 ## 🧠 Investigation Agent
+
+### TCP analysis update / TCP 分析更新
+
+抓包检测现在先对 TCP 负载进行有界重组，再识别明文 HTTP/1.x，不再仅检查固定端口的单包前 512 字节。单向连接窗口最多 256 KiB / 2048 段，所有窗口负载合计最多 16 MiB，最多跟踪 2048 个方向。达到上限时分析并释放旧窗口，界面与 JSON 警告会提示覆盖受限；这些是负载预算，不是整个程序的内存上限。
+
+TCP payloads are reconstructed in bounded directional windows before plaintext HTTP/1.x detection, including on nonstandard ports. Limits: 256 KiB and 2048 segments per window, 16 MiB total buffered payload, 2048 directions. Limits, gaps and conflicting overlaps are reported; these are payload budgets, not a total application memory guarantee.
+
+限制 / Limitations: 不跨缺口拼接，不解密 TLS，不重组 IP 分片，不支持 IPv6；窗口边界可能漏检。HTTP 统计表示包含可识别 HTTP 的连续窗口数，不是精确请求数。请求/响应关联、PCAP 时间戳与包编号证据仍待实现。Conflicting overlaps require manual review; absence of findings does not prove safety. HTTP counts represent recognized contiguous windows, not exact transactions. Request/response correlation and packet-level provenance remain future work.
+
+离线测试 / Offline tests: `node --test --test-isolation=none tests/tcp-reassembly.test.mjs` (Node.js 24).
 
 Agent 不是简单复述告警，而是围绕证据完成调查整理：
 
